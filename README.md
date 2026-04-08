@@ -108,7 +108,7 @@ Then run `tg-ui` or `./install.sh` to start fresh.
 
 ## Clean Uninstall
 
-To completely remove the proxy, delete all containers, and wipe configuration files to start from a clean slate, run the following command:
+To delete all data associated with a project, run the following command::
 
 ```bash
 docker rm -f telemt-proxy 2>/dev/null; \
