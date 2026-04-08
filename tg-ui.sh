@@ -1,0 +1,699 @@
+#!/bin/bash
+
+# ==========================================
+# MTProto Proxy Manager (tg-ui) - Telemt-Plus
+# ==========================================
+
+RESET='\033[0m'
+BOLD='\033[1m'
+DIM='\033[2m'
+GREEN='\033[32m'
+RED='\033[31m'
+YELLOW='\033[33m'
+CYAN='\033[36m'
+NC='\033[0m'
+
+# ── UI helpers (Claude Code style) ───────────────────────────
+_ok()   { printf "  \033[32m✓\033[0m  \033[2m%s\033[0m\n" "$1"; }
+_fail() { printf "  \033[31m✗\033[0m  %s\n" "$1"; }
+_log()  { printf "  \033[2m%s\033[0m\n" "$1"; }
+_spin() { printf "\r  \033[32m%s\033[0m  \033[2m%s\033[0m" "$1" "$2"; }
+_spin_ok() { printf "\r  \033[32m✓\033[0m  \033[2m%-55s\033[0m\n" "$1"; }
+
+# Legacy aliases kept for any remaining callers
+ok()   { _ok "$1"; }
+fail() { _fail "$1"; }
+info() { _log "$1"; }
+
+CONFIG_FILE="$HOME/.telemt-ui-config.env"
+CONTAINER_NAME="telemt-proxy"
+IMAGE_NAME="telemt-custom"
+
+# Resolve absolute path to the project directory, even if executed via symlink
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+  DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+PROJECT_DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
+
+CONFIG_TOML="$PROJECT_DIR/config.toml"
+USERS_DB="$PROJECT_DIR/.telemt-users.db"
+
+# Make sudo optional if not installed
+if ! command -v sudo >/dev/null; then
+  sudo() { "$@"; }
+fi
+
+# Detect Docker Compose command (legacy binary vs modern plugin)
+if docker compose version >/dev/null 2>&1; then
+  DOCKER_COMPOSE="docker compose"
+elif docker-compose version >/dev/null 2>&1; then
+  DOCKER_COMPOSE="docker-compose"
+else
+  echo -e "${RED}❌ Docker Compose is not installed!${NC}"
+  exit 1
+fi
+
+# Default values for all settings
+FAKE_DOMAIN="ya.ru"
+PORT="8443"
+INTERNAL_PORT="443"
+USER_MAX_IPS="0"
+SECRET=""
+SERVER_IP=""
+MASK_ENABLED="true"
+LOG_LEVEL="normal"
+MASK_PORT="443"
+
+# Load persistent variables if they exist
+if [ -f "$CONFIG_FILE" ]; then
+  source "$CONFIG_FILE"
+fi
+
+function save_config_env() {
+  # When running via "sudo bash install.sh", $HOME=/root but config must go to
+  # the real user's home so 'tg-ui' (as non-root) can find and load it.
+  local target_config="$CONFIG_FILE"
+  if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+    local sudo_home
+    sudo_home=$(getent passwd "$SUDO_USER" | cut -d: -f6 2>/dev/null || eval echo "~$SUDO_USER")
+    target_config="$sudo_home/.telemt-ui-config.env"
+  fi
+
+  cat << EOF | sudo tee "$target_config" > /dev/null
+FAKE_DOMAIN="${FAKE_DOMAIN}"
+PORT="${PORT}"
+USER_MAX_IPS="${USER_MAX_IPS:-0}"
+SECRET="${SECRET}"
+SERVER_IP="${SERVER_IP}"
+MASK_ENABLED="${MASK_ENABLED:-true}"
+LOG_LEVEL="${LOG_LEVEL:-warn}"
+MASK_PORT="${MASK_PORT:-443}"
+EOF
+
+  # Update local .env for docker-compose with sudo
+  cat << EOF | sudo tee "$PROJECT_DIR/.env" > /dev/null
+CONTAINER_NAME="${CONTAINER_NAME}"
+PORT="${PORT}"
+INTERNAL_PORT="${INTERNAL_PORT:-443}"
+USER_MAX_IPS="${USER_MAX_IPS:-0}"
+FAKE_DOMAIN="${FAKE_DOMAIN}"
+MASK_ENABLED="${MASK_ENABLED:-true}"
+LOG_LEVEL="${LOG_LEVEL:-warn}"
+MASK_PORT="${MASK_PORT:-443}"
+EOF
+
+  # Ensure config is readable by everyone to allow 'tg-ui qr' to work as non-root
+  sudo chmod 644 "$target_config" "$PROJECT_DIR/.env"
+}
+
+function migrate_to_multi_user() {
+  [ -f "$USERS_DB" ] && return
+
+  touch "$USERS_DB"
+  local default_links_created=false
+
+  if ! grep -q "^admin:" "$USERS_DB"; then
+    local admin_sec="$SECRET"
+    if [ -z "$admin_sec" ]; then
+      if command -v openssl >/dev/null 2>&1; then admin_sec=$(openssl rand -hex 16); else admin_sec=$(head -c 16 /dev/urandom | xxd -p | tr -d '\n'); fi
+      SECRET="$admin_sec"
+      save_config_env
+    fi
+    echo "admin:${admin_sec}:0" >> "$USERS_DB"
+    default_links_created=true
+  fi
+
+  if ! grep -q "^public:" "$USERS_DB"; then
+    local public_sec
+    if command -v openssl >/dev/null 2>&1; then public_sec=$(openssl rand -hex 16); else public_sec=$(head -c 16 /dev/urandom | xxd -p | tr -d '\n'); fi
+    echo "public:${public_sec}:0" >> "$USERS_DB"
+    default_links_created=true
+  fi
+
+  if [ "$default_links_created" = true ]; then
+    _ok "Default links created (unlimited)"
+  fi
+}
+
+function get_config_toml_content() {
+  cat << EOF
+[general]
+ad_tag = "00000000000000000000000000000000"
+use_middle_proxy = true
+log_level = "${LOG_LEVEL:-warn}"
+
+[general.modes]
+classic = false
+secure = false
+tls = true
+
+[server]
+port = 443
+user_max_unique_ips = ${USER_MAX_IPS:-0}
+
+[server.api]
+enabled = true
+listen = "0.0.0.0:9091"
+
+[censorship]
+tls_domain = "${FAKE_DOMAIN}"
+mask = ${MASK_ENABLED:-true}
+mask_port = ${MASK_PORT:-443}
+fake_cert_len = 2048
+
+[access.users]
+EOF
+
+  while IFS=: read -r name secret limit; do
+    [ -z "$name" ] && continue
+    echo "$name = \"$secret\""
+  done < "$USERS_DB"
+
+  echo ""
+  echo "[access.user_max_unique_ips]"
+
+  while IFS=: read -r name secret limit; do
+    [ -z "$name" ] && continue
+    echo "$name = $limit"
+  done < "$USERS_DB"
+}
+
+function generate_secret() {
+  if command -v openssl >/dev/null 2>&1; then
+    SECRET=$(openssl rand -hex 16)
+  else
+    SECRET=$(head -c 16 /dev/urandom | xxd -p | tr -d '\n')
+  fi
+}
+
+function check_port_free() {
+  local port=$1
+  if command -v ss >/dev/null 2>&1; then
+    ! sudo ss -tunlp | grep -q ":$port "
+  elif command -v netstat >/dev/null 2>&1; then
+    ! sudo netstat -tunlp | grep -q ":$port "
+  elif command -v lsof >/dev/null 2>&1; then
+    ! sudo lsof -i :$port >/dev/null 2>&1
+  else
+    return 0
+  fi
+}
+
+function find_best_port() {
+  # FIX: Added 9443 immediately after 8443 as next fallback
+  local preferred_ports=(8443 9443 443 2053 2083 2087 2096 8888)
+
+  if check_port_free "$PORT"; then
+    return
+  fi
+
+  info "Port $PORT is occupied — scanning for available port..."
+
+  for p in "${preferred_ports[@]}"; do
+    if [ "$p" == "$PORT" ]; then continue; fi
+    if check_port_free "$p"; then
+      ok "Using free port: $p"
+      PORT="$p"
+      return
+    fi
+  done
+
+  # Final fallback: scan from 10000+
+  local p=10000
+  while ! check_port_free "$p"; do ((p++)); done
+  PORT="$p"
+}
+
+function start_proxy() {
+  local _frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+  local _fi=0
+
+  echo
+  printf "  \033[1mStarting proxy\033[0m\n"
+
+  save_config_env
+  _ok "Config saved"
+
+  if sudo docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+    sudo docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1
+    _ok "Old container removed"
+  fi
+
+  if [ -z "$SECRET" ]; then generate_secret; fi
+  find_best_port
+  _ok "Port $PORT ready"
+
+  local ram_config="/dev/shm/telemt-tgui-config.toml"
+  sudo rm -f "$ram_config" 2>/dev/null
+  get_config_toml_content | sudo tee "$ram_config" >/dev/null
+  sudo chmod 644 "$ram_config"
+  _ok "Config written"
+
+  save_config_env
+  cd "$PROJECT_DIR"
+  sudo $DOCKER_COMPOSE down >/dev/null 2>&1
+
+  if sudo $DOCKER_COMPOSE up -d >/dev/null 2>&1; then
+    local i=0
+    while [ $i -lt 40 ]; do
+      local status=$(sudo docker inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null)
+      if [ "$status" == "running" ]; then
+        _spin_ok "Container running"
+        break
+      fi
+      _spin "${_frames[$((i % 10))]}" "Waiting for container..."
+      ((i++)); sleep 0.1
+    done
+
+    if [ -z "$SERVER_IP" ]; then
+      if command -v curl >/dev/null 2>&1; then
+        SERVER_IP=$(curl -s --connect-timeout 3 ifconfig.me 2>/dev/null ||
+                    curl -s --connect-timeout 3 ipinfo.io/ip 2>/dev/null ||
+                    curl -s --connect-timeout 3 icanhazip.com 2>/dev/null ||
+                    curl -s --connect-timeout 3 api.ipify.org 2>/dev/null)
+      fi
+      # Fallback: local IP
+      if [ -z "$SERVER_IP" ]; then
+        SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+      fi
+    fi
+
+    save_config_env
+    show_link
+  else
+    _fail "Error starting container"
+    return 1
+  fi
+}
+
+function _fetch_ip() {
+  if [ -z "$SERVER_IP" ]; then
+    if command -v curl >/dev/null 2>&1; then
+      SERVER_IP=$(curl -s --connect-timeout 3 ifconfig.me 2>/dev/null ||
+                  curl -s --connect-timeout 3 ipinfo.io/ip 2>/dev/null ||
+                  curl -s --connect-timeout 3 icanhazip.com 2>/dev/null ||
+                  curl -s --connect-timeout 3 api.ipify.org 2>/dev/null)
+    fi
+    if [ -z "$SERVER_IP" ]; then
+      SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+    fi
+  fi
+}
+
+function show_link() {
+  local target_user=$1
+  _fetch_ip
+
+  local domain_hex=$(echo -n "$FAKE_DOMAIN" | xxd -ps -c 256 | tr -d '\n')
+
+  echo
+  printf "  \033[1mProxy connections\033[0m\n"
+  printf "  \033[2m%-12s\033[0m  %s\n" "ip" "${SERVER_IP:-unknown}"
+  printf "  \033[2m%-12s\033[0m  %s\n" "port" "$PORT"
+  printf "  \033[2m%-12s\033[0m  %s\n" "fake-tls" "$FAKE_DOMAIN"
+
+  while IFS=: read -r name secret limit; do
+    [ -z "$name" ] && continue
+    if [ -n "$target_user" ] && [ "$target_user" != "$name" ]; then continue; fi
+
+    local limit_text
+    if [ "$limit" -eq "0" ]; then limit_text="unlimited"; else limit_text="${limit} IP"; fi
+
+    local link_secret="ee${secret}${domain_hex}"
+    local link="tg://proxy?server=${SERVER_IP}&port=${PORT}&secret=${link_secret}"
+
+    printf "  \033[2m─── %s · %s \033[0m\n" "$name" "$limit_text"
+    printf "  \033[32m%s\033[0m\n" "$link"
+  done < "$USERS_DB"
+  echo
+}
+
+function show_qr() {
+  local target_user=$1
+  _fetch_ip
+
+  local domain_hex=$(echo -n "$FAKE_DOMAIN" | xxd -ps -c 256 | tr -d '\n')
+  local current=1
+
+  clear
+  echo
+  printf "  \033[38;2;255;120;0m\033[1mMTProxy QR codes\033[0m\n"
+  printf "  \033[2m──────────────────────────────────────────────────────\033[0m\n"
+
+  while IFS=: read -r name secret limit; do
+    [ -z "$name" ] && continue
+    if [ -n "$target_user" ] && [ "$target_user" != "$name" ]; then continue; fi
+
+    local limit_text
+    if [ "$limit" -eq "0" ]; then limit_text="unlimited"; else limit_text="${limit} IP"; fi
+
+    local link_secret="ee${secret}${domain_hex}"
+    local link="tg://proxy?server=${SERVER_IP}&port=${PORT}&secret=${link_secret}"
+
+    printf "  \033[2m%s · %s\033[0m\n" "$name" "$limit_text"
+    echo
+
+    if ! command -v qrencode >/dev/null 2>&1; then
+      printf "  \033[31m✗\033[0m  qrencode not found\n"
+    else
+      qr_output=$(qrencode -t UTF8i -m 2 "$link")
+      first_line=$(head -n 1 <<< "$qr_output")
+      qr_width=${#first_line}
+      padding=$(( (60 - qr_width) / 2 ))
+      [ $padding -lt 0 ] && padding=0
+      pad_str=$(printf "%*s" $padding "")
+      echo "$qr_output" | sed "s/^/$pad_str/"
+    fi
+
+    printf "  \033[2m──────────────────────────────────────────────────────\033[0m\n"
+    ((current++))
+  done < "$USERS_DB"
+
+  printf "  \033[2mPress Enter to return...\033[0m"
+  read
+}
+
+function manage_users() {
+  while true; do
+    clear
+    printf "  \033[38;2;255;120;0m\033[1mMTProxy-Telemt-tg-ui\033[0m  \033[2m|  Links & Users\033[0m\n"
+    printf "  \033[2m──────────────────────────────────────────────────────\033[0m\n"
+    printf "  \033[2m%-3s  %-14s  %-10s  %s\033[0m\n" "#" "name" "ip limit" "secret"
+    printf "  \033[2m──────────────────────────────────────────────────────\033[0m\n"
+
+    local names=()
+    local count=1
+    while IFS=: read -r name secret limit; do
+      [ -z "$name" ] && continue
+      names+=("$name")
+      printf "  \033[33m%-3s\033[0m  \033[2m%-14s  %-10s  %s...\033[0m\n" "$count)" "$name" "$limit" "$(echo "$secret" | cut -c1-8)"
+      ((count++))
+    done < "$USERS_DB"
+
+    printf "  \033[2m──────────────────────────────────────────────────────\033[0m\n"
+    printf "  \033[2m1)\033[0m  Add new link\n"
+    printf "  \033[2m2)\033[0m  Delete link\n"
+    printf "  \033[2m3)\033[0m  Change IP limit\n"
+    printf "  \033[2m4)\033[0m  Show all connections\n"
+    printf "  \033[2m5)\033[0m  Show QR codes\n"
+    printf "  \033[2m0)\033[0m  Back\n"
+    printf "  \033[2m──────────────────────────────────────────────────────\033[0m\n"
+    printf "  select: "
+    read user_choice
+
+    case $user_choice in
+      1)
+        printf "  name for new link: "
+        read new_name
+        if [ -n "$new_name" ]; then
+          if [[ ! "$new_name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+            _fail "Name can only contain letters, numbers, dash and underscore"
+            sleep 2
+            continue
+          fi
+          if grep -q "^$new_name:" "$USERS_DB" 2>/dev/null; then
+            _fail "A user with this name already exists"
+            sleep 2
+            continue
+          fi
+          local new_secret
+          if command -v openssl >/dev/null 2>&1; then new_secret=$(openssl rand -hex 16); else new_secret=$(head -c 16 /dev/urandom | xxd -p | tr -d '\n'); fi
+          echo "$new_name:$new_secret:0" >> "$USERS_DB"
+          start_proxy
+        fi
+        ;;
+      2)
+        printf "  # to delete: "
+        read del_idx
+        if [[ "$del_idx" =~ ^[0-9]+$ ]]; then
+          real_idx=$((del_idx-1))
+          if [ $real_idx -ge 0 ] && [ $real_idx -lt ${#names[@]} ]; then
+            del_name="${names[$real_idx]}"
+            sed -i "/^$del_name:/d" "$USERS_DB"
+            start_proxy
+          fi
+        fi
+        ;;
+      3)
+        printf "  # to update: "
+        read up_idx
+        if [[ "$up_idx" =~ ^[0-9]+$ ]]; then
+          real_idx=$((up_idx-1))
+          if [ $real_idx -ge 0 ] && [ $real_idx -lt ${#names[@]} ]; then
+            up_name="${names[$real_idx]}"
+            printf "  new IP limit for %s \033[2m(0 = unlimited)\033[0m: " "$up_name"
+            read up_limit
+            if [[ "$up_limit" =~ ^[0-9]+$ ]]; then
+              local old_line=$(grep "^$up_name:" "$USERS_DB")
+              local old_secret=$(echo "$old_line" | cut -d: -f2)
+              sed -i "s/^$up_name:.*/$up_name:$old_secret:$up_limit/" "$USERS_DB"
+              start_proxy
+            fi
+          fi
+        fi
+        ;;
+      4) show_link; printf "  \033[2mPress Enter to return...\033[0m"; read ;;
+      5) show_qr ;;
+      0) break ;;
+    esac
+  done
+}
+
+function update_from_upstream() {
+  echo
+  printf "  \033[1mUpdating proxy image\033[0m\n"
+  cd "$PROJECT_DIR"
+  if sudo $DOCKER_COMPOSE pull; then
+    _ok "Image updated"
+    start_proxy
+  else
+    _fail "Error downloading updates"
+  fi
+}
+
+function rotate_secrets() {
+  echo
+  printf "  \033[33m!\033[0m  This will re-generate ALL secrets for ALL users\n"
+  printf "  \033[2mExisting users will need new links to connect\033[0m\n"
+  printf "  are you sure? (y/n): "
+  read confirm
+  if [ "$confirm" == "y" ]; then
+    local tmp_db=$(mktemp)
+    while IFS=: read -r name secret limit; do
+      [ -z "$name" ] && continue
+      local new_secret
+      if command -v openssl >/dev/null 2>&1; then new_secret=$(openssl rand -hex 16); else new_secret=$(head -c 16 /dev/urandom | xxd -p | tr -d '\n'); fi
+      echo "$name:$new_secret:$limit" >> "$tmp_db"
+    done < "$USERS_DB"
+    mv "$tmp_db" "$USERS_DB"
+    _ok "All secrets rotated"
+    start_proxy
+  fi
+}
+
+function change_fake_tls() {
+  printf "  new Fake TLS domain: "
+  read input
+  if [ -n "$input" ]; then
+    FAKE_DOMAIN="$input"
+    save_config_env
+    start_proxy
+  fi
+}
+
+function select_sni_domain() {
+  local domains=("google.com" "apple.com" "wikipedia.org" "cloudflare.com" "bing.com" "microsoft.com" "itunes.apple.com" "updates.cdn-apple.com" "ia.ru" "ok.ru")
+
+  clear
+  printf "  \033[38;2;255;120;0m\033[1mMTProxy-Telemt-tg-ui\033[0m  \033[2m|  SNI Domain\033[0m\n"
+  printf "  \033[33m!\033[0m  \033[2mChanging SNI will update ALL links — users will need new links\033[0m\n"
+  printf "  \033[2m──────────────────────────────────────────────────────\033[0m\n"
+  for i in "${!domains[@]}"; do
+    printf "  \033[2m%2d)\033[0m  %s\n" "$((i+1))" "${domains[$i]}"
+  done
+  printf "  \033[2m %d)\033[0m  Custom domain  \033[2m(current: %s)\033[0m\n" 0 "$FAKE_DOMAIN"
+  printf "  \033[2m──────────────────────────────────────────────────────\033[0m\n"
+  printf "  select: "
+  read sd_choice
+
+  if [[ "$sd_choice" =~ ^[0-9]+$ ]] && [ "$sd_choice" -gt 0 ] && [ "$sd_choice" -le "${#domains[@]}" ]; then
+    FAKE_DOMAIN="${domains[$((sd_choice-1))]}"
+    save_config_env
+    start_proxy
+  elif [ "$sd_choice" == "0" ]; then
+    printf "  custom domain: "
+    read custom
+    if [ -n "$custom" ]; then
+      FAKE_DOMAIN="$custom"
+      save_config_env
+      start_proxy
+    fi
+  fi
+}
+
+function select_log_level() {
+  clear
+  printf "  \033[38;2;255;120;0m\033[1mMTProxy-Telemt-tg-ui\033[0m  \033[2m|  Log Level\033[0m\n"
+  printf "  \033[2m──────────────────────────────────────────────────────\033[0m\n"
+  printf "  \033[2m1)\033[0m  silent   \033[2m- no logs (max privacy)\033[0m\n"
+  printf "  \033[2m2)\033[0m  normal   \033[2m- standard logs (recommended)\033[0m\n"
+  printf "  \033[2m3)\033[0m  verbose  \033[2m- detailed connection info\033[0m\n"
+  printf "  \033[2m4)\033[0m  debug    \033[2m- all technical data\033[0m\n"
+  printf "  \033[2m0)\033[0m  cancel\n"
+  printf "  \033[2m──────────────────────────────────────────────────────\033[0m\n"
+  printf "  select: "
+  read ll_choice
+
+  case $ll_choice in
+    1) LOG_LEVEL="silent" ;;
+    2) LOG_LEVEL="normal" ;;
+    3) LOG_LEVEL="verbose" ;;
+    4) LOG_LEVEL="debug" ;;
+    0) return ;;
+    *) _fail "Invalid choice"; sleep 1; return ;;
+  esac
+  save_config_env
+  start_proxy
+}
+
+function advanced_security_menu() {
+  while true; do
+    clear
+    printf "  \033[38;2;255;120;0m\033[1mMTProxy-Telemt-tg-ui\033[0m  \033[2m|  Security\033[0m\n"
+    printf "  \033[2m──────────────────────────────────────────────────────\033[0m\n"
+
+    local mask_status
+    if [ "$MASK_ENABLED" == "true" ]; then
+      mask_status="\033[32mon\033[0m"
+    else
+      mask_status="\033[31moff\033[0m"
+    fi
+
+    printf "  \033[2m1)\033[0m  Active masking   %b\n" "$mask_status"
+    printf "  \033[2m2)\033[0m  SNI domain       \033[2m%s\033[0m\n" "$FAKE_DOMAIN"
+    printf "  \033[2m3)\033[0m  Log level        \033[2m%s\033[0m\n" "${LOG_LEVEL^^}"
+    printf "  \033[2m4)\033[0m  Rotate all secrets\n"
+    printf "  \033[2m0)\033[0m  Back\n"
+    printf "  \033[2m──────────────────────────────────────────────────────\033[0m\n"
+    printf "  select: "
+    read as_choice
+
+    case $as_choice in
+      1)
+        if [ "$MASK_ENABLED" == "true" ]; then MASK_ENABLED="false"; else MASK_ENABLED="true"; fi
+        save_config_env; start_proxy ;;
+      2) select_sni_domain ;;
+      3) select_log_level ;;
+      4) rotate_secrets ;;
+      0) break ;;
+    esac
+  done
+}
+
+function show_menu() {
+  if ! sudo docker ps | grep -q ${CONTAINER_NAME}; then
+    start_proxy
+    sleep 1
+  fi
+
+  while true; do
+    clear
+    printf "  \033[38;2;255;120;0m\033[1mMTProxy-Telemt-tg-ui\033[0m  \033[2m|  Settings\033[0m\n"
+    if sudo docker ps | grep -q ${CONTAINER_NAME}; then
+      printf "  \033[2mstatus\033[0m  \033[32m● running\033[0m  \033[2m(port %s)\033[0m\n" "$PORT"
+    else
+      printf "  \033[2mstatus\033[0m  \033[31m○ stopped\033[0m\n"
+    fi
+    printf "  \033[2m──────────────────────────────────────────────────────\033[0m\n"
+    printf "  \033[2m1)\033[0m  Restart proxy\n"
+    printf "  \033[2m2)\033[0m  Change Fake TLS  \033[2m(%s)\033[0m\n" "$FAKE_DOMAIN"
+    printf "  \033[2m3)\033[0m  Change port  \033[2m(%s)\033[0m\n" "$PORT"
+      printf "  \033[2m4)\033[0m  Manage links & users\n"
+    printf "  \033[2m5)\033[0m  Advanced security settings\n"
+    printf "  \033[2m6)\033[0m  Update proxy image\n"
+    printf "  \033[2m7)\033[0m  Stop proxy\n"
+    printf "  \033[2m8)\033[0m  View logs\n"
+    printf "  \033[2m0)\033[0m  Exit\n"
+    printf "  \033[2m──────────────────────────────────────────────────────\033[0m\n"
+    printf "  select: "
+    read choice
+
+    case $choice in
+      1) start_proxy ;;
+      2) change_fake_tls ;;
+      3)
+        printf "  Enter new port \033[2m[current: %s]\033[0m: " "$PORT"
+        read input
+        if [[ "$input" =~ ^[0-9]+$ ]]; then
+          PORT="$input"
+          save_config_env
+          start_proxy
+        elif [ -n "$input" ]; then
+          _fail "Port must be a number (you entered: $input)"
+          sleep 2
+        fi
+        ;;
+      4) manage_users ;;
+      5) advanced_security_menu ;;
+      6) update_from_upstream; printf "  \033[2mPress Enter to return...\033[0m"; read ;;
+      7)
+        cd "$PROJECT_DIR"
+        sudo $DOCKER_COMPOSE down
+        _ok "Service stopped"
+        sleep 1
+        ;;
+      8)
+        cd "$PROJECT_DIR"
+        sudo $DOCKER_COMPOSE logs --tail 20
+        printf "\n  \033[2mPress Enter to return...\033[0m"; read
+        ;;
+      0) printf "\n  \033[2mBye!\033[0m\n\n"; exit 0 ;;
+      *) _fail "Invalid command"; sleep 1 ;;
+    esac
+  done
+}
+
+if [ "$1" == "--auto" ]; then
+  sleep 5
+  migrate_to_multi_user
+  start_proxy > /dev/null 2>&1
+  exit 0
+elif [ "$1" == "start" ]; then
+  migrate_to_multi_user
+  start_proxy
+  exit 0
+elif [ "$1" == "stop" ]; then
+  cd "$PROJECT_DIR"
+  sudo $DOCKER_COMPOSE down
+  ok "Service stopped"
+  exit 0
+elif [ "$1" == "link" ]; then
+  migrate_to_multi_user
+  show_link
+  exit 0
+elif [ "$1" == "qr" ]; then
+  migrate_to_multi_user
+  show_qr
+  exit 0
+elif [ "$1" == "help" ] || [ -n "$1" ]; then
+  echo
+  printf "  \033[38;2;255;120;0m\033[1mMTProxy Management Commands\033[0m\n"
+  printf "  \033[2m──────────────────────────────────────────────────────\033[0m\n"
+  printf "  \033[33m%-18s\033[0m  \033[2m%s\033[0m\n" "tg-ui"       "Open interactive menu"
+  printf "  \033[33m%-18s\033[0m  \033[2m%s\033[0m\n" "tg-ui start" "Start / restart proxy"
+  printf "  \033[33m%-18s\033[0m  \033[2m%s\033[0m\n" "tg-ui stop"  "Stop proxy service"
+  printf "  \033[33m%-18s\033[0m  \033[2m%s\033[0m\n" "tg-ui link"  "Show all connection links"
+  printf "  \033[33m%-18s\033[0m  \033[2m%s\033[0m\n" "tg-ui qr"    "Generate QR codes for links"
+  printf "  \033[33m%-18s\033[0m  \033[2m%s\033[0m\n" "tg-ui help"  "Show this help message"
+  printf "  \033[2m──────────────────────────────────────────────────────\033[0m\n"
+  echo
+  exit 0
+fi
+
+if [ "${BASH_SOURCE[0]}" == "${0}" ]; then
+  migrate_to_multi_user
+  show_menu
+fi

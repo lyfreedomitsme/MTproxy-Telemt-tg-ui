@@ -1,0 +1,15 @@
+# Project-specific sensitive files
+.env
+.telemt-users.db
+.telemt-ui-config.env
+*.db
+
+# Docker / Compose
+.git
+.github
+target
+.kilocode
+cache
+tlsfront
+*.tar
+*.tar.gz
