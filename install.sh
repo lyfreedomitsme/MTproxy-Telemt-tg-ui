@@ -72,9 +72,9 @@ printf "  \033[1mChecking dependencies\033[0m\n"
 if ! command -v docker >/dev/null 2>&1; then
     _log "Docker not found — installing..."
     if command -v apt >/dev/null 2>&1; then
-        run_with_spinner "Installing Docker" sudo apt install -y docker.io xxd git
+        run_with_spinner "Installing Docker" sudo apt install -y docker.io xxd git qrencode
     elif command -v yum >/dev/null 2>&1; then
-        run_with_spinner "Installing Docker" sudo yum install -y docker xxd git
+        run_with_spinner "Installing Docker" sudo yum install -y docker xxd git qrencode
         sudo systemctl start docker && sudo systemctl enable docker
     else
         _fail "Cannot install Docker automatically. Please install it manually."
@@ -100,9 +100,9 @@ fi
 
 if ! command -v git >/dev/null 2>&1 || ! command -v xxd >/dev/null 2>&1; then
     if command -v apt >/dev/null 2>&1; then
-        run_with_spinner "Installing git + xxd" sudo apt install -y git xxd
+        run_with_spinner "Installing git + xxd + qrencode" sudo apt install -y git xxd qrencode
     elif command -v yum >/dev/null 2>&1; then
-        run_with_spinner "Installing git + xxd" sudo yum install -y git xxd
+        run_with_spinner "Installing git + xxd + qrencode" sudo yum install -y git xxd qrencode
     fi
 else
     _ok "git + xxd"

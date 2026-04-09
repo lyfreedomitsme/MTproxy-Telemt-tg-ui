@@ -147,6 +147,12 @@ function migrate_to_multi_user() {
 
   if [ "$default_links_created" = true ]; then
     _ok "Default links created (unlimited)"
+    # Ensure USERS_DB is owned by the real user if created as root
+    local real_user="${SUDO_USER:-$USER}"
+    if [ "$(id -u)" -eq 0 ] && [ "$real_user" != "root" ]; then
+      chown "$real_user":"$real_user" "$USERS_DB" 2>/dev/null || true
+    fi
+    chmod 600 "$USERS_DB"
   fi
 }
 
@@ -951,7 +957,7 @@ function sync_mikrotik_commands() {
   local MIKROTIK_PRIV=$(grep -oP '/interface wireguard add .* private-key="\K[^"]+' "$MIKROTIK_TXT" 2>/dev/null || echo "PLACEHOLDER")
 
   # Regenerate TXT file with current IP and Current Proxy Port
-  cat > "$MIKROTIK_TXT" <<EOF
+  sudo tee "$MIKROTIK_TXT" >/dev/null <<EOF
 /interface wireguard add comment="Telemt Cascade" listen-port=13231 name=wg-telemt private-key="$MIKROTIK_PRIV"
 /interface wireguard peers add allowed-address=0.0.0.0/0 comment="Telemt Cascade" endpoint-address=$DISPLAY_IP endpoint-port=51830 interface=wg-telemt public-key="$SERVER_PUB"
 /ip address add address=10.99.99.2/24 comment="Telemt Cascade" interface=wg-telemt
@@ -991,6 +997,14 @@ function toggle_proxy_protocol() {
 }
 
 function show_menu() {
+  # Auto-fix permissions if running as root or via sudo
+  local real_user="${SUDO_USER:-$USER}"
+  if [ "$(id -u)" -eq 0 ] && [ "$real_user" != "root" ]; then
+    chown "$real_user":"$real_user" "$USERS_DB" "$PROJECT_DIR/.env" "$CONFIG_FILE" 2>/dev/null || true
+    chmod 600 "$USERS_DB"
+    chmod 644 "$PROJECT_DIR/.env" "$CONFIG_FILE"
+  fi
+
   if ! sudo docker ps | grep -q ${CONTAINER_NAME}; then
     start_proxy
     sleep 1
