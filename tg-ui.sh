@@ -890,7 +890,7 @@ EOF
   
   printf "  \033[32m✔\033[0m  Ubuntu WG Tunnel (wg-telemt) started successfully!\n\n"
   
-  printf "  ${BOLD}Now, open your Mikrotik Terminal and paste these exact commands:${RESET}\n"
+  printf "  ${ORANGE}${BOLD}Now, open your Mikrotik Terminal and paste these exact commands:${RESET}\n"
   printf "  \033[2m──────────────────────────────────────────────────────────────\033[0m\n"
   
   while IFS= read -r line; do
