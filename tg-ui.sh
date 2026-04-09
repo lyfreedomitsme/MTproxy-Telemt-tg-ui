@@ -66,6 +66,8 @@ SERVER_IP=""
 MASK_ENABLED="true"
 LOG_LEVEL="normal"
 MASK_PORT="443"
+PROXY_PROTOCOL="false"
+PROXY_PROTOCOL_CIDRS=""
 
 # Load persistent variables if they exist
 if [ -f "$CONFIG_FILE" ]; then
@@ -91,6 +93,8 @@ SERVER_IP="${SERVER_IP}"
 MASK_ENABLED="${MASK_ENABLED:-true}"
 LOG_LEVEL="${LOG_LEVEL:-warn}"
 MASK_PORT="${MASK_PORT:-443}"
+PROXY_PROTOCOL="${PROXY_PROTOCOL:-false}"
+PROXY_PROTOCOL_CIDRS="${PROXY_PROTOCOL_CIDRS:-}"
 EOF
 
   # Update local .env for docker-compose with sudo
@@ -103,6 +107,8 @@ FAKE_DOMAIN="${FAKE_DOMAIN}"
 MASK_ENABLED="${MASK_ENABLED:-true}"
 LOG_LEVEL="${LOG_LEVEL:-warn}"
 MASK_PORT="${MASK_PORT:-443}"
+PROXY_PROTOCOL="${PROXY_PROTOCOL:-false}"
+PROXY_PROTOCOL_CIDRS="${PROXY_PROTOCOL_CIDRS:-}"
 EOF
 
   # Ensure config is readable by everyone to allow 'tg-ui qr' to work as non-root
@@ -158,6 +164,23 @@ tls = true
 
 [server]
 port = ${PORT:-8443}
+EOF
+
+  if [ "$PROXY_PROTOCOL" == "true" ]; then
+    echo "proxy_protocol = true"
+    if [ -n "$PROXY_PROTOCOL_CIDRS" ]; then
+      IFS=',' read -ra ADDR <<< "$PROXY_PROTOCOL_CIDRS"
+      cidrs_arr=""
+      for i in "${ADDR[@]}"; do
+        i="$(echo "$i" | tr -d '[:space:]')"
+        [ -n "$i" ] && cidrs_arr="$cidrs_arr\"$i\", "
+      done
+      cidrs_arr="[${cidrs_arr%, }]"
+      echo "proxy_protocol_trusted_cidrs = $cidrs_arr"
+    fi
+  fi
+
+  cat <<EOF
 
 [server.api]
 enabled = true
@@ -583,10 +606,18 @@ function advanced_security_menu() {
       mask_status="\033[31moff\033[0m"
     fi
 
+    local proxy_status
+    if [ "$PROXY_PROTOCOL" == "true" ]; then
+      proxy_status="\033[32mon\033[0m"
+    else
+      proxy_status="\033[31moff\033[0m"
+    fi
+
     printf "  \033[2m1)\033[0m  Active masking   %b\n" "$mask_status"
     printf "  \033[2m2)\033[0m  SNI domain       \033[2m%s\033[0m\n" "$FAKE_DOMAIN"
     printf "  \033[2m3)\033[0m  Log level        \033[2m%s\033[0m\n" "${LOG_LEVEL^^}"
-    printf "  \033[2m4)\033[0m  Rotate all secrets\n"
+    printf "  \033[2m4)\033[0m  PROXY Protocol   %b\n" "$proxy_status"
+    printf "  \033[2m5)\033[0m  Rotate all secrets\n"
     printf "  \033[2m0)\033[0m  Back\n"
     printf "  \033[2m──────────────────────────────────────────────────────\033[0m\n"
     printf "  select: "
@@ -598,10 +629,41 @@ function advanced_security_menu() {
         save_config_env; start_proxy ;;
       2) select_sni_domain ;;
       3) select_log_level ;;
-      4) rotate_secrets ;;
+      4) toggle_proxy_protocol ;;
+      5) rotate_secrets ;;
       0) break ;;
     esac
   done
+}
+
+function toggle_proxy_protocol() {
+  clear
+  printf "  \033[38;2;255;120;0m\033[1mMTProxy-Telemt-tg-ui\033[0m  \033[2m|  PROXY Protocol\033[0m\n"
+  printf "  \033[2m──────────────────────────────────────────────────────\033[0m\n"
+  
+  if [ "$PROXY_PROTOCOL" == "true" ]; then
+    PROXY_PROTOCOL="false"
+    PROXY_PROTOCOL_CIDRS=""
+    save_config_env
+    start_proxy
+    _ok "PROXY Protocol disabled"
+  else
+    printf "  Enable HAProxy PROXY Protocol support? [y/N]: "
+    read ans
+    if [[ "$ans" =~ ^[Yy]$ ]]; then
+      PROXY_PROTOCOL="true"
+      printf "  \n"
+      printf "  \033[2mEnter your frontend server IPs separated by comma\033[0m\n"
+      printf "  \033[2m(Example: 10.0.0.0/8, 192.168.1.100/32)\033[0m\n"
+      printf "  trusted IPs (leave empty to trust ANY source): "
+      read cidrs
+      PROXY_PROTOCOL_CIDRS="$cidrs"
+      save_config_env
+      start_proxy
+      _ok "PROXY Protocol enabled"
+    fi
+  fi
+  sleep 2
 }
 
 function show_menu() {
