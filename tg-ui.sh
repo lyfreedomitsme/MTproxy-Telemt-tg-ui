@@ -139,11 +139,17 @@ function migrate_to_multi_user() {
 }
 
 function get_config_toml_content() {
+  local has_per_user_limits=false
+  while IFS=: read -r name secret limit; do
+    [ -z "$name" ] && continue
+    [ "${limit:-0}" -gt 0 ] && has_per_user_limits=true
+  done < "$USERS_DB"
+
   cat << EOF
 [general]
 ad_tag = "00000000000000000000000000000000"
 use_middle_proxy = true
-log_level = "${LOG_LEVEL:-warn}"
+log_level = "${LOG_LEVEL:-normal}"
 
 [general.modes]
 classic = false
@@ -152,7 +158,6 @@ tls = true
 
 [server]
 port = 443
-user_max_unique_ips = ${USER_MAX_IPS:-0}
 
 [server.api]
 enabled = true
@@ -164,6 +169,10 @@ mask = ${MASK_ENABLED:-true}
 mask_port = ${MASK_PORT:-443}
 fake_cert_len = 2048
 
+[access]
+user_max_unique_ips_global_each = ${USER_MAX_IPS:-0}
+user_max_unique_ips_mode = "active_window"
+
 [access.users]
 EOF
 
@@ -172,13 +181,15 @@ EOF
     echo "$name = \"$secret\""
   done < "$USERS_DB"
 
-  echo ""
-  echo "[access.user_max_unique_ips]"
-
-  while IFS=: read -r name secret limit; do
-    [ -z "$name" ] && continue
-    echo "$name = $limit"
-  done < "$USERS_DB"
+  # Only write per-user IP limit section when at least one user has a positive limit
+  if [ "$has_per_user_limits" = true ]; then
+    echo ""
+    echo "[access.user_max_unique_ips]"
+    while IFS=: read -r name secret limit; do
+      [ -z "$name" ] && continue
+      [ "${limit:-0}" -gt 0 ] && echo "$name = $limit"
+    done < "$USERS_DB"
+  fi
 }
 
 function generate_secret() {
