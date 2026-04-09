@@ -11,6 +11,8 @@ GREEN='\033[32m'
 RED='\033[31m'
 YELLOW='\033[33m'
 CYAN='\033[36m'
+BLUE='\033[38;2;0;120;255m'
+ORANGE='\033[38;2;255;120;0m'
 NC='\033[0m'
 
 # ── UI helpers (Claude Code style) ───────────────────────────
@@ -25,7 +27,13 @@ ok()   { _ok "$1"; }
 fail() { _fail "$1"; }
 info() { _log "$1"; }
 
-CONFIG_FILE="$HOME/.telemt-ui-config.env"
+# Resolve the real user's home directory (even if running via sudo)
+REAL_HOME="$HOME"
+if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+  REAL_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6 2>/dev/null || eval echo "~$SUDO_USER")
+fi
+
+CONFIG_FILE="$REAL_HOME/.telemt-ui-config.env"
 CONTAINER_NAME="telemt-proxy"
 IMAGE_NAME="telemt-custom"
 
@@ -68,6 +76,7 @@ LOG_LEVEL="normal"
 MASK_PORT="443"
 PROXY_PROTOCOL="false"
 PROXY_PROTOCOL_CIDRS=""
+MIKROTIK_EXT_PORT="${MIKROTIK_EXT_PORT:-443}"
 
 # Load persistent variables if they exist
 if [ -f "$CONFIG_FILE" ]; then
@@ -78,11 +87,6 @@ function save_config_env() {
   # When running via "sudo bash install.sh", $HOME=/root but config must go to
   # the real user's home so 'tg-ui' (as non-root) can find and load it.
   local target_config="$CONFIG_FILE"
-  if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
-    local sudo_home
-    sudo_home=$(getent passwd "$SUDO_USER" | cut -d: -f6 2>/dev/null || eval echo "~$SUDO_USER")
-    target_config="$sudo_home/.telemt-ui-config.env"
-  fi
 
   cat << EOF | sudo tee "$target_config" > /dev/null
 FAKE_DOMAIN="${FAKE_DOMAIN}"
@@ -95,6 +99,7 @@ LOG_LEVEL="${LOG_LEVEL:-warn}"
 MASK_PORT="${MASK_PORT:-443}"
 PROXY_PROTOCOL="${PROXY_PROTOCOL:-false}"
 PROXY_PROTOCOL_CIDRS="${PROXY_PROTOCOL_CIDRS:-}"
+MIKROTIK_EXT_PORT="${MIKROTIK_EXT_PORT:-443}"
 EOF
 
   # Update local .env for docker-compose with sudo
@@ -109,6 +114,7 @@ LOG_LEVEL="${LOG_LEVEL:-warn}"
 MASK_PORT="${MASK_PORT:-443}"
 PROXY_PROTOCOL="${PROXY_PROTOCOL:-false}"
 PROXY_PROTOCOL_CIDRS="${PROXY_PROTOCOL_CIDRS:-}"
+MIKROTIK_EXT_PORT="${MIKROTIK_EXT_PORT:-443}"
 EOF
 
   # Ensure config is readable by everyone to allow 'tg-ui qr' to work as non-root
@@ -287,6 +293,7 @@ function start_proxy() {
   _ok "Config written"
 
   save_config_env
+  sync_mikrotik_commands  # Auto-refresh Mikrotik commands if port/IP changed
   cd "$PROJECT_DIR"
   sudo $DOCKER_COMPOSE down >/dev/null 2>&1
 
@@ -324,29 +331,66 @@ function start_proxy() {
 }
 
 function _fetch_ip() {
-  if [ -z "$SERVER_IP" ]; then
+  if [ -z "$SERVER_IP" ] || [ "$SERVER_IP" == "YOUR_UBUNTU_IP" ]; then
     if command -v curl >/dev/null 2>&1; then
-      SERVER_IP=$(curl -s --connect-timeout 3 ifconfig.me 2>/dev/null ||
-                  curl -s --connect-timeout 3 ipinfo.io/ip 2>/dev/null ||
-                  curl -s --connect-timeout 3 icanhazip.com 2>/dev/null ||
-                  curl -s --connect-timeout 3 api.ipify.org 2>/dev/null)
+      SERVER_IP=$(curl -s --connect-timeout 2 ifconfig.me 2>/dev/null || \
+                  curl -s --connect-timeout 2 ipinfo.io/ip 2>/dev/null || \
+                  curl -s --connect-timeout 2 icanhazip.com 2>/dev/null || \
+                  curl -s --connect-timeout 2 api.ipify.org 2>/dev/null)
     fi
+    # Fallback to local primary interface IP if external detection fails
     if [ -z "$SERVER_IP" ]; then
-      SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+      SERVER_IP=$(ip route get 1.1.1.1 2>/dev/null | grep -oP 'src \K\S+' || \
+                  hostname -I | awk '{print $1}')
+    fi
+  else
+    # Verify if stored IP is still present on the machine (optional but safer)
+    if [[ ! "$SERVER_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+       # It might be a domain, skip validation
+       return
+    fi
+    # If the stored IP is NOT in the local IPs and we are not in cascade mode
+    if ! _is_cascade_active && ! hostname -I | grep -q "$SERVER_IP"; then
+       # Silent check for IP change
+       local new_ip=$(curl -s --connect-timeout 2 ifconfig.me 2>/dev/null)
+       if [ -n "$new_ip" ] && [ "$new_ip" != "$SERVER_IP" ]; then
+         SERVER_IP="$new_ip"
+         save_config_env
+       fi
     fi
   fi
+}
+
+function _is_cascade_active() {
+  [ -f "/etc/wireguard/wg-telemt.conf" ] && \
+  ip link show wg-telemt &>/dev/null && \
+  ip rule show | grep -q "table wg_table"
+}
+
+function _get_cascade_ip() {
+  local ext_ip=$(sudo wg show wg-telemt endpoints 2>/dev/null | awk '{print $2}' | cut -d: -f1 | grep -v "(none)" | head -n 1)
+  echo "${ext_ip:-$SERVER_IP}"
 }
 
 function show_link() {
   local target_user=$1
   _fetch_ip
 
+  local display_ip="$SERVER_IP"
+  local display_port="$PORT"
+
+  if _is_cascade_active; then
+    display_ip=$(_get_cascade_ip)
+    display_port="$MIKROTIK_EXT_PORT"
+    _ok "Cascade active: Generating links for Mikrotik ($display_ip:$display_port)"
+  fi
+
   local domain_hex=$(echo -n "$FAKE_DOMAIN" | xxd -ps -c 256 | tr -d '\n')
 
   echo
   printf "  \033[1mProxy connections\033[0m\n"
-  printf "  \033[2m%-12s\033[0m  %s\n" "ip" "${SERVER_IP:-unknown}"
-  printf "  \033[2m%-12s\033[0m  %s\n" "port" "$PORT"
+  printf "  \033[2m%-12s\033[0m  %s\n" "ip" "${display_ip:-unknown}"
+  printf "  \033[2m%-12s\033[0m  %s\n" "port" "$display_port"
   printf "  \033[2m%-12s\033[0m  %s\n" "fake-tls" "$FAKE_DOMAIN"
 
   while IFS=: read -r name secret limit; do
@@ -357,10 +401,10 @@ function show_link() {
     if [ "$limit" -eq "0" ]; then limit_text="unlimited"; else limit_text="${limit} IP"; fi
 
     local link_secret="ee${secret}${domain_hex}"
-    local link="tg://proxy?server=${SERVER_IP}&port=${PORT}&secret=${link_secret}"
+    local link="tg://proxy?server=${display_ip}&port=${display_port}&secret=${link_secret}"
 
     printf "  \033[2m─── %s · %s \033[0m\n" "$name" "$limit_text"
-    printf "  \033[32m%s\033[0m\n" "$link"
+    printf "  ${GREEN}%s${RESET}\n" "$link"
   done < "$USERS_DB"
   echo
 }
@@ -369,12 +413,23 @@ function show_qr() {
   local target_user=$1
   _fetch_ip
 
+  local display_ip="$SERVER_IP"
+  local display_port="$PORT"
+
+  if _is_cascade_active; then
+    display_ip=$(_get_cascade_ip)
+    display_port="$MIKROTIK_EXT_PORT"
+  fi
+
   local domain_hex=$(echo -n "$FAKE_DOMAIN" | xxd -ps -c 256 | tr -d '\n')
   local current=1
 
   clear
   echo
   printf "  \033[38;2;255;120;0m\033[1mMTProxy QR codes\033[0m\n"
+  if _is_cascade_active; then
+    printf "  \033[32m●\033[0m \033[2mMikrotik Cascade Active ($display_ip:$display_port)\033[0m\n"
+  fi
   printf "  \033[2m──────────────────────────────────────────────────────\033[0m\n"
 
   while IFS=: read -r name secret limit; do
@@ -385,7 +440,7 @@ function show_qr() {
     if [ "$limit" -eq "0" ]; then limit_text="unlimited"; else limit_text="${limit} IP"; fi
 
     local link_secret="ee${secret}${domain_hex}"
-    local link="tg://proxy?server=${SERVER_IP}&port=${PORT}&secret=${link_secret}"
+    local link="tg://proxy?server=${display_ip}&port=${display_port}&secret=${link_secret}"
 
     printf "  \033[2m%s · %s\033[0m\n" "$name" "$limit_text"
     echo
@@ -508,6 +563,45 @@ function update_from_upstream() {
   fi
 }
 
+function update_panel() {
+  echo
+  printf "  \033[1mUpdating management panel\033[0m\n"
+  cd "$PROJECT_DIR"
+  if [ -d ".git" ]; then
+    if git pull; then
+      _ok "Panel updated from Git"
+      printf "  \033[33m!\033[0m  Please restart the script to apply changes.\n"
+      sleep 2
+    else
+      _fail "Git pull failed"
+    fi
+  else
+    # Non-git update (fallback to curl)
+    if command -v curl >/dev/null 2>&1; then
+       local raw_url="https://raw.githubusercontent.com/lyfreedomitsme/MTproxy-Telmet-tg-ui/master/tg-ui.sh"
+       if curl -sL "$raw_url" -o /tmp/tg-ui-update.sh; then
+          chmod +x /tmp/tg-ui-update.sh
+          # Replace binary in /usr/local/bin
+          sudo mv /tmp/tg-ui-update.sh /usr/local/bin/tg-ui
+          # Also replace the local file if we are running the local one
+          if [[ "${BASH_SOURCE[0]}" == "$PROJECT_DIR/tg-ui.sh" ]]; then
+            cp /usr/local/bin/tg-ui "$PROJECT_DIR/tg-ui.sh" 2>/dev/null || true
+          fi
+          _ok "Panel updated via Direct Download"
+          sleep 1
+          # If we are in the terminal (not piped), restart
+          if [ -t 0 ]; then
+            exec tg-ui
+          fi
+       else
+          _fail "Download failed"
+       fi
+    else
+       _fail "curl not found, cannot update without Git"
+    fi
+  fi
+}
+
 function rotate_secrets() {
   echo
   printf "  \033[33m!\033[0m  This will re-generate ALL secrets for ALL users\n"
@@ -593,6 +687,45 @@ function select_log_level() {
   start_proxy
 }
 
+function select_server_ip() {
+  clear
+  printf "  \033[38;2;255;120;0m\033[1mMTProxy-Telemt-tg-ui\033[0m  \033[2m|  Server IP\033[0m\n"
+  printf "  \033[33m!\033[0m  \033[2mChoosing a specific IP will update all links and QR codes\033[0m\n"
+  printf "  \033[2m──────────────────────────────────────────────────────\033[0m\n"
+
+  # Fetch all local IPv4 addresses (excluding loopback)
+  local ips=($(hostname -I))
+  local current_found=false
+
+  for i in "${!ips[@]}"; do
+    local ip="${ips[$i]}"
+    local marker=""
+    if [ "$ip" == "$SERVER_IP" ]; then
+      marker=" \033[32m(current)\033[0m"
+      current_found=true
+    fi
+    printf "  \033[2m%2d)\033[0m  %s%s\n" "$((i+1))" "$ip" "$marker"
+  done
+
+  printf "  \033[2m 0)\033[0m  Automatic detection\n"
+  printf "  \033[2m──────────────────────────────────────────────────────\033[0m\n"
+  printf "  select: "
+  read ip_choice
+
+  if [[ "$ip_choice" =~ ^[0-9]+$ ]] && [ "$ip_choice" -gt 0 ] && [ "$ip_choice" -le "${#ips[@]}" ]; then
+    SERVER_IP="${ips[$((ip_choice-1))]}"
+    save_config_env
+    _ok "Server IP updated to: $SERVER_IP"
+    sleep 2
+  elif [ "$ip_choice" == "0" ]; then
+    SERVER_IP=""
+    _fetch_ip
+    save_config_env
+    _ok "Server IP reset to automatic detection ($SERVER_IP)"
+    sleep 2
+  fi
+}
+
 function advanced_security_menu() {
   while true; do
     clear
@@ -618,6 +751,9 @@ function advanced_security_menu() {
     printf "  \033[2m3)\033[0m  Log level        \033[2m%s\033[0m\n" "${LOG_LEVEL^^}"
     printf "  \033[2m4)\033[0m  PROXY Protocol   %b\n" "$proxy_status"
     printf "  \033[2m5)\033[0m  Rotate all secrets\n"
+    printf "  \033[2m6)\033[0m  Mikrotik Cascade (Wireguard)\n"
+    printf "  \033[2m7)\033[0m  Remove Cascade Tunnel\n"
+    printf "  \033[2m8)\033[0m  Change Server IP  \033[2m(%s)\033[0m\n" "${SERVER_IP:-auto}"
     printf "  \033[2m0)\033[0m  Back\n"
     printf "  \033[2m──────────────────────────────────────────────────────\033[0m\n"
     printf "  select: "
@@ -631,9 +767,197 @@ function advanced_security_menu() {
       3) select_log_level ;;
       4) toggle_proxy_protocol ;;
       5) rotate_secrets ;;
+      6) setup_mikrotik_cascade ;;
+      7) remove_mikrotik_cascade ;;
+      8) select_server_ip ;;
       0) break ;;
     esac
   done
+}
+
+function setup_mikrotik_cascade() {
+  clear
+  printf "  \033[38;2;255;120;0m\033[1mMTProxy-Telemt-tg-ui\033[0m  \033[2m|  Mikrotik Cascade Setup\033[0m\n"
+  printf "  \033[2m──────────────────────────────────────────────────────\033[0m\n"
+
+  _fetch_ip
+  local DISPLAY_IP="${SERVER_IP:-YOUR_UBUNTU_IP}"
+  
+  if [ "$EUID" -ne 0 ]; then
+    printf "  \033[31mx\033[0m  Error: You must run this script with \033[1msudo\033[0m to configure Wireguard.\n"
+    printf "     Please exit and run: \033[32msudo ./tg-ui.sh\033[0m\n"
+    read -p "  Press Enter to return..."
+    return
+  fi
+  
+  if ! command -v wg &> /dev/null; then
+    printf "  \033[33m!\033[0m  Wireguard tools not installed. Installing...\n"
+    apt-get update && apt-get install -y wireguard-tools iptables iproute2
+    if ! command -v wg &> /dev/null; then
+       printf "  \033[31mx\033[0m  Failed to install wireguard-tools. Please install manually.\n"
+       read -p "  Press Enter to return..."
+       return
+    fi
+  fi
+
+  if [ "$(sysctl -n net.ipv4.ip_forward)" != "1" ]; then
+    printf "  \033[2mEnabling IP forwarding...\033[0m\n"
+    sysctl -w net.ipv4.ip_forward=1 > /dev/null
+    grep -q "^net.ipv4.ip_forward=1" /etc/sysctl.conf || echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
+  fi
+  
+  local WG_DIR="/etc/wireguard"
+  local CONF_FILE="$WG_DIR/wg-telemt.conf"
+  local MIKROTIK_TXT="$WG_DIR/wg-telemt-mikrotik.txt"
+  
+  if [ -f "$CONF_FILE" ]; then
+    local pbr_status="\033[31m○ offline\033[0m"
+    if ip rule show | grep -q "table wg_table" && ip route show table wg_table | grep -q "default" && ip link show wg-telemt &>/dev/null; then
+      pbr_status="\033[32m● running\033[0m"
+    fi
+
+    printf "  \033[2mstatus\033[0m  %b\n" "$pbr_status"
+    printf "  \033[31mx\033[0m  Cascade tunnel (wg-telemt) already exists!\n"
+    printf "     Config path: \033[2m%s\033[0m\n" "$CONF_FILE"
+    if [ -f "$MIKROTIK_TXT" ]; then
+      printf "\n  ${BOLD}Mikrotik Commands:${RESET}\n"
+      printf "  \033[2m──────────────────────────────────────────────────────────────\033[0m\n"
+      while IFS= read -r line; do
+        line="${line//YOUR_UBUNTU_IP/$DISPLAY_IP}"
+        printf "  ${CYAN}%s${RESET}\n" "$line"
+      done < "$MIKROTIK_TXT"
+      printf "  \033[2m──────────────────────────────────────────────────────────────\033[0m\n"
+    fi
+    printf "\n"
+    read -p "  Press Enter to return..."
+    return
+  fi
+  
+  printf "  \033[2mGenerating secure tunnel keys...\033[0m\n"
+  local SERVER_PRIV=$(wg genkey)
+  local SERVER_PUB=$(echo "$SERVER_PRIV" | wg pubkey)
+  local MIKROTIK_PRIV=$(wg genkey)
+  local MIKROTIK_PUB=$(echo "$MIKROTIK_PRIV" | wg pubkey)
+  
+  local WG_IP_SERVER="10.99.99.1"
+  local WG_IP_MIKROTIK="10.99.99.2"
+  local WG_PORT="51830"
+
+  printf "  \033[2mConfiguring external access...\033[0m\n"
+  printf "  Which port to use on Mikrotik for users? [default: 443]: "
+  read ext_port_input
+  if [[ "$ext_port_input" =~ ^[0-9]+$ ]]; then
+    MIKROTIK_EXT_PORT="$ext_port_input"
+  else
+    MIKROTIK_EXT_PORT="443"
+  fi
+  save_config_env
+
+  mkdir -p "$WG_DIR"
+  cat > "$CONF_FILE" <<EOF
+[Interface]
+PrivateKey = $SERVER_PRIV
+Address = $WG_IP_SERVER/24
+ListenPort = $WG_PORT
+Table = off
+PostUp = grep -q "200 wg_table" /etc/iproute2/rt_tables || echo "200 wg_table" >> /etc/iproute2/rt_tables
+PostUp = ip rule add from $WG_IP_SERVER table wg_table
+PostUp = ip route add default dev wg-telemt table wg_table
+PostDown = ip rule del from $WG_IP_SERVER table wg_table || true
+PostDown = ip route del default dev wg-telemt table wg_table || true
+
+[Peer]
+PublicKey = $MIKROTIK_PUB
+AllowedIPs = 0.0.0.0/0
+EOF
+  chmod 600 "$CONF_FILE"
+
+  cat > "$MIKROTIK_TXT" <<EOF
+/interface wireguard add comment="Telemt Cascade" listen-port=13231 name=wg-telemt private-key="$MIKROTIK_PRIV"
+/interface wireguard peers add allowed-address=0.0.0.0/0 comment="Telemt Cascade" endpoint-address=$DISPLAY_IP endpoint-port=$WG_PORT interface=wg-telemt public-key="$SERVER_PUB"
+/ip address add address=$WG_IP_MIKROTIK/24 comment="Telemt Cascade" interface=wg-telemt
+/ip firewall nat add action=accept chain=srcnat comment="Telemt Cascade" protocol=tcp dst-port=$PORT out-interface=wg-telemt place-before=0
+/ip firewall nat add action=dst-nat chain=dstnat comment="Telemt Cascade" protocol=tcp dst-port=$MIKROTIK_EXT_PORT in-interface=ether1 to-addresses=$WG_IP_SERVER to-ports=$PORT
+EOF
+  
+  systemctl enable --now wg-quick@wg-telemt &> /dev/null || true
+  
+  printf "  \033[32m✔\033[0m  Ubuntu WG Tunnel (wg-telemt) started successfully!\n\n"
+  
+  printf "  ${BOLD}Now, open your Mikrotik Terminal and paste these exact commands:${RESET}\n"
+  printf "  \033[2m──────────────────────────────────────────────────────────────\033[0m\n"
+  
+  while IFS= read -r line; do
+    printf "  ${CYAN}%s${RESET}\n" "$line"
+  done < "$MIKROTIK_TXT"
+
+  printf "  \033[2m──────────────────────────────────────────────────────────────\033[0m\n\n"
+  printf "  ${ORANGE}!${RESET}  Note: If the detected IP ${ORANGE}%s${RESET} is incorrect, replace it manually.\n" "$DISPLAY_IP"
+  printf "  ${ORANGE}!${RESET}  Note: Replace ${ORANGE}ether1${RESET} with your Mikrotik's actual Internet interface name (if different).\n\n"
+  printf "  \033[2mClean text copy saved to: \033[2m%s\033[0m\n\n" "$MIKROTIK_TXT"
+
+  read -p "  Press Enter after you have saved these commands..."
+}
+
+function remove_mikrotik_cascade() {
+  clear
+  printf "  \033[38;2;255;120;0m\033[1mMTProxy-Telemt-tg-ui\033[0m  \033[2m|  Remove Cascade\033[0m\n"
+  printf "  \033[2m──────────────────────────────────────────────────────\033[0m\n"
+
+  if [ "$EUID" -ne 0 ]; then
+    printf "  \033[31mx\033[0m  Error: You must run with \033[1msudo\033[0m to remove Wireguard configurations.\n"
+    read -p "  Press Enter to return..."
+    return
+  fi
+
+  local WG_DIR="/etc/wireguard"
+  local CONF_FILE="$WG_DIR/wg-telemt.conf"
+  local MIKROTIK_TXT="$WG_DIR/wg-telemt-mikrotik.txt"
+
+  if [ ! -f "$CONF_FILE" ]; then
+    printf "  \033[33m!\033[0m  No cascade tunnel (wg-telemt) found.\n\n"
+    read -p "  Press Enter to return..."
+    return
+  fi
+
+  printf "  \033[33m!\033[0m  This will remove the Wireguard tunnel and all related configs.\n"
+  printf "  Are you sure? (y/n): "
+  read confirm
+  if [ "$confirm" != "y" ]; then return; fi
+
+  printf "  \033[2mStopping Wireguard interface...\033[0m\n"
+  systemctl disable --now wg-quick@wg-telemt &>/dev/null || true
+  ip link delete wg-telemt &>/dev/null || true
+  
+  # Note: 200 wg_table is left in rt_tables to avoid messing up other possible tunnels,
+  # but the rules and routes are deleted by PostDown/systemctl.
+
+  rm -f "$CONF_FILE" "$MIKROTIK_TXT"
+  _ok "Cascade tunnel removed successfully"
+  sleep 2
+}
+
+function sync_mikrotik_commands() {
+  local WG_DIR="/etc/wireguard"
+  local CONF_FILE="$WG_DIR/wg-telemt.conf"
+  local MIKROTIK_TXT="$WG_DIR/wg-telemt-mikrotik.txt"
+
+  [ ! -f "$CONF_FILE" ] && return
+  [ ! -f "$MIKROTIK_TXT" ] && return
+
+  _fetch_ip
+  local DISPLAY_IP="${SERVER_IP:-YOUR_UBUNTU_IP}"
+  local SERVER_PUB=$(grep "PrivateKey" "$CONF_FILE" | awk '{print $3}' | wg pubkey)
+  local MIKROTIK_PRIV=$(grep -oP '/interface wireguard add .* private-key="\K[^"]+' "$MIKROTIK_TXT" 2>/dev/null || echo "PLACEHOLDER")
+
+  # Regenerate TXT file with current IP and Current Proxy Port
+  cat > "$MIKROTIK_TXT" <<EOF
+/interface wireguard add comment="Telemt Cascade" listen-port=13231 name=wg-telemt private-key="$MIKROTIK_PRIV"
+/interface wireguard peers add allowed-address=0.0.0.0/0 comment="Telemt Cascade" endpoint-address=$DISPLAY_IP endpoint-port=51830 interface=wg-telemt public-key="$SERVER_PUB"
+/ip address add address=10.99.99.2/24 comment="Telemt Cascade" interface=wg-telemt
+/ip firewall nat add action=accept chain=srcnat comment="Telemt Cascade" protocol=tcp dst-port=$PORT out-interface=wg-telemt place-before=0
+/ip firewall nat add action=dst-nat chain=dstnat comment="Telemt Cascade" protocol=tcp dst-port=$MIKROTIK_EXT_PORT in-interface=ether1 to-addresses=10.99.99.1 to-ports=$PORT
+EOF
 }
 
 function toggle_proxy_protocol() {
@@ -689,6 +1013,7 @@ function show_menu() {
     printf "  \033[2m6)\033[0m  Update proxy image\n"
     printf "  \033[2m7)\033[0m  Stop proxy\n"
     printf "  \033[2m8)\033[0m  View logs\n"
+    printf "  \033[2m9)\033[0m  Update panel\n"
     printf "  \033[2m0)\033[0m  Exit\n"
     printf "  \033[2m──────────────────────────────────────────────────────\033[0m\n"
     printf "  select: "
@@ -723,6 +1048,7 @@ function show_menu() {
         sudo $DOCKER_COMPOSE logs --tail 20
         printf "\n  \033[2mPress Enter to return...\033[0m"; read
         ;;
+      9) update_panel ;;
       0) printf "\n  \033[2mBye!\033[0m\n\n"; exit 0 ;;
       *) _fail "Invalid command"; sleep 1 ;;
     esac
@@ -741,7 +1067,10 @@ elif [ "$1" == "start" ]; then
 elif [ "$1" == "stop" ]; then
   cd "$PROJECT_DIR"
   sudo $DOCKER_COMPOSE down
-  ok "Service stopped"
+  _ok "Service stopped"
+  exit 0
+elif [ "$1" == "update" ]; then
+  update_panel
   exit 0
 elif [ "$1" == "link" ]; then
   migrate_to_multi_user
@@ -760,7 +1089,8 @@ elif [ "$1" == "help" ] || [ -n "$1" ]; then
   printf "  \033[33m%-18s\033[0m  \033[2m%s\033[0m\n" "tg-ui stop"  "Stop proxy service"
   printf "  \033[33m%-18s\033[0m  \033[2m%s\033[0m\n" "tg-ui link"  "Show all connection links"
   printf "  \033[33m%-18s\033[0m  \033[2m%s\033[0m\n" "tg-ui qr"    "Generate QR codes for links"
-  printf "  \033[33m%-18s\033[0m  \033[2m%s\033[0m\n" "tg-ui help"  "Show this help message"
+  printf "  \033[33m%-18s\033[0m  \033[2m%s\033[0m\n" "tg-ui update" "Update management tool"
+  printf "  \033[33m%-18s\033[0m  \033[2m%s\033[0m\n" "tg-ui help"   "Show this help message"
   printf "  \033[2m──────────────────────────────────────────────────────\033[0m\n"
   echo
   exit 0

@@ -22,6 +22,14 @@ YELLOW='\033[33m'
 CYAN='\033[36m'
 NC='\033[0m'
 
+# ── Argument Parsing ─────────────────────────────────────────
+UPDATE_MODE=false
+for arg in "$@"; do
+  if [ "$arg" == "--update" ] || [ "$arg" == "update" ]; then
+    UPDATE_MODE=true
+  fi
+done
+
 # ── Helpers ───────────────────────────────────────────────────
 _ok()   { printf "  \033[32m✓\033[0m  \033[2m%s\033[0m\n" "$1"; }
 _fail() { printf "  \033[31m✗\033[0m  %s\n" "$1"; }
@@ -130,18 +138,22 @@ fi
 echo
 printf "  \033[1mCleaning previous installation\033[0m\n"
 
-if [ -f "/usr/local/bin/tg-ui" ] || sudo docker ps -a --format '{{.Names}}' | grep -q "^telemt-proxy$"; then
-    _log "Existing installation detected"
-    sudo docker stop telemt-proxy >/dev/null 2>&1 || true
-    sudo docker rm -f telemt-proxy >/dev/null 2>&1 || true
-    _ok "Old container removed"
-fi
+if [ "$UPDATE_MODE" == "true" ]; then
+    _log "Update mode active — preserving existing configs and users"
+else
+    if [ -f "/usr/local/bin/tg-ui" ] || sudo docker ps -a --format '{{.Names}}' | grep -q "^telemt-proxy$"; then
+        _log "Existing installation detected"
+        sudo docker stop telemt-proxy >/dev/null 2>&1 || true
+        sudo docker rm -f telemt-proxy >/dev/null 2>&1 || true
+        _ok "Old container removed"
+    fi
 
-rm -f "$HOME/.telemt-ui-config.env"
-if [ -f "$PROJECT_DIR/tg-ui.sh" ]; then
-    rm -f "$PROJECT_DIR/.telemt-users.db" "$PROJECT_DIR/.env"
+    rm -f "$HOME/.telemt-ui-config.env"
+    if [ -f "$PROJECT_DIR/tg-ui.sh" ]; then
+        rm -f "$PROJECT_DIR/.telemt-users.db" "$PROJECT_DIR/.env"
+    fi
+    _ok "Old configs cleared"
 fi
-_ok "Old configs cleared"
 
 # ── Phase 3: Configuration ────────────────────────────────────
 echo
