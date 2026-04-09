@@ -87,6 +87,45 @@ All user secrets can be rotated at once from the security menu.
 
 ---
 
+## Advanced: Cascading & Tunneling (Mikrotik / HAProxy)
+
+If you place this server behind another router or VPN (like Mikrotik) using standard NAT/Masquerading, the proxy will see the router's IP instead of the original clients' IPs. This completely breaks per-user IP connection limits. 
+
+To deploy a cascade properly, choose one of the following methods depending on your architecture. (It is usually best to set `PORT=443` in `tg-ui` if you intend to run your frontends on port 443).
+
+### Scenario A: Hardware Router (Mikrotik) over WireGuard
+If your server sits behind a Mikrotik routing traffic via a WireGuard/IPIP tunnel, **do not use Proxy Protocol**. Instead, configure the routing natively so the real IP is preserved on a packet level:
+
+1. **On Mikrotik (Disable Masquerade for MTProxy):**
+   Add an exclusion rule at the very top of your NAT list to prevent masquerading specifically for the proxy port (e.g., `8443`).
+   ```routeros
+   /ip firewall nat add action=accept chain=srcnat protocol=tcp dst-port=8443 out-interface=wg0 place-before=0
+   ```
+2. **On Ubuntu (Policy-Based Routing):**
+   Force the Ubuntu server to reply to incoming tunnel packets back through the tunnel, making masquerade unnecessary.
+   ```bash
+   echo "200 wg_table" >> /etc/iproute2/rt_tables
+   ip rule add from <UBUNTU_WG_IP> table wg_table
+   ip route add default via <MIKROTIK_WG_IP> dev wg0 table wg_table
+   ```
+
+### Scenario B: Linux VPS Cascading (HAProxy / Xray)
+If you use a Linux VPS in another country to forward traffic, standard port forwarding will destroy the client IP. Instead, use the built-in PROXY Protocol feature.
+
+1. **On Ubuntu (Configure \`tg-ui\`):**
+   Go to `5) Advanced security settings` -> `4) PROXY Protocol` and turn it ON. Enter your frontend VPS IP to trust its headers.
+   *Note: Directly connecting to the server will no longer work; it will strictly expect HAProxy standard headers.*
+2. **On your Frontend server (HAProxy config):**
+   Configure HAProxy to append the `send-proxy` directive when forwarding traffic to Ubuntu.
+   ```haproxy
+   listen proxy_in
+       bind *:443
+       mode tcp
+       server telemt-backend <UBUNTU_IP>:8443 send-proxy
+   ```
+
+---
+
 ## Security
 
 - Container runs as a non-root user with a read-only filesystem and dropped Linux capabilities
