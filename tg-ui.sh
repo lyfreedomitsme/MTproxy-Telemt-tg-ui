@@ -911,7 +911,8 @@ function remove_mikrotik_cascade() {
   printf "  \033[2m──────────────────────────────────────────────────────\033[0m\n"
 
   if [ "$EUID" -ne 0 ]; then
-    printf "  \033[31mx\033[0m  Error: You must run with \033[1msudo\033[0m to remove Wireguard configurations.\n"
+    printf "  \033[31mx\033[0m  Error: You must run this script with \033[1msudo\033[0m to remove Wireguard configurations.\n"
+    printf "     Please exit and run: \033[32msudo ./tg-ui.sh\033[0m\n"
     read -p "  Press Enter to return..."
     return
   fi
