@@ -3,9 +3,7 @@ services:
     image: ghcr.io/telemt/telemt:latest
     container_name: ${CONTAINER_NAME:-telemt-proxy}
     restart: unless-stopped
-    ports:
-      - "${PORT:-8443}:${INTERNAL_PORT:-443}"
-      - "127.0.0.1:9091:9091"
+    network_mode: "host"
     working_dir: /run/telemt
     read_only: true
     cap_drop:

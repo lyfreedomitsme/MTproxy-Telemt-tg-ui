@@ -157,11 +157,11 @@ secure = false
 tls = true
 
 [server]
-port = 443
+port = ${PORT:-8443}
 
 [server.api]
 enabled = true
-listen = "0.0.0.0:9091"
+listen = "127.0.0.1:9091"
 
 [censorship]
 tls_domain = "${FAKE_DOMAIN}"
