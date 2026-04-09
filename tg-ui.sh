@@ -979,7 +979,7 @@ function toggle_proxy_protocol() {
     start_proxy
     _ok "PROXY Protocol disabled"
   else
-    printf "  Enable HAProxy PROXY Protocol support? [y/N]: "
+    printf "  Enable HAProxy PROXY Protocol support? \033[2m(y/n)\033[0m: "
     read ans
     if [[ "$ans" =~ ^[Yy]$ ]]; then
       PROXY_PROTOCOL="true"
