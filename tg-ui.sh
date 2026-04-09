@@ -100,6 +100,7 @@ MASK_PORT="${MASK_PORT:-443}"
 PROXY_PROTOCOL="${PROXY_PROTOCOL:-false}"
 PROXY_PROTOCOL_CIDRS="${PROXY_PROTOCOL_CIDRS:-}"
 MIKROTIK_EXT_PORT="${MIKROTIK_EXT_PORT:-443}"
+AD_TAG="${AD_TAG:-00000000000000000000000000000000}"
 EOF
 
   # Update local .env for docker-compose with sudo
@@ -115,6 +116,7 @@ MASK_PORT="${MASK_PORT:-443}"
 PROXY_PROTOCOL="${PROXY_PROTOCOL:-false}"
 PROXY_PROTOCOL_CIDRS="${PROXY_PROTOCOL_CIDRS:-}"
 MIKROTIK_EXT_PORT="${MIKROTIK_EXT_PORT:-443}"
+AD_TAG="${AD_TAG:-00000000000000000000000000000000}"
 EOF
 
   # Ensure config is readable by everyone to allow 'tg-ui qr' to work as non-root
@@ -165,7 +167,7 @@ function get_config_toml_content() {
 
   cat << EOF
 [general]
-ad_tag = "00000000000000000000000000000000"
+ad_tag = "${AD_TAG:-00000000000000000000000000000000}"
 use_middle_proxy = true
 log_level = "${LOG_LEVEL:-normal}"
 
@@ -293,8 +295,14 @@ function start_proxy() {
   _ok "Port $PORT ready"
 
   local ram_config="/dev/shm/telemt-tgui-config.toml"
-  sudo rm -f "$ram_config" 2>/dev/null
-  get_config_toml_content | sudo tee "$ram_config" >/dev/null
+  printf "  \033[2mGenerating config...\033[0m\n"
+  
+  # Remove if Docker incorrectly created this path as a directory
+  if [ -d "$ram_config" ]; then
+    sudo rm -rf "$ram_config"
+  fi
+  
+  get_config_toml_content | sudo tee "$ram_config" > /dev/null
   sudo chmod 644 "$ram_config"
   _ok "Config written"
 
@@ -370,7 +378,7 @@ function _fetch_ip() {
 function _is_cascade_active() {
   [ -f "/etc/wireguard/wg-telemt.conf" ] && \
   ip link show wg-telemt &>/dev/null && \
-  ip rule show | grep -q "table wg_table"
+  wg show wg-telemt 2>/dev/null | grep -q "latest handshake"
 }
 
 function _get_cascade_ip() {
@@ -406,7 +414,12 @@ function show_link() {
     local limit_text
     if [ "$limit" -eq "0" ]; then limit_text="unlimited"; else limit_text="${limit} IP"; fi
 
-    local link_secret="ee${secret}${domain_hex}"
+    local link_secret
+    if [ "$MASK_ENABLED" == "true" ]; then
+      link_secret="ee${secret}${domain_hex}"
+    else
+      link_secret="$secret"
+    fi
     local link="tg://proxy?server=${display_ip}&port=${display_port}&secret=${link_secret}"
 
     printf "  \033[2m─── %s · %s \033[0m\n" "$name" "$limit_text"
@@ -445,7 +458,12 @@ function show_qr() {
     local limit_text
     if [ "$limit" -eq "0" ]; then limit_text="unlimited"; else limit_text="${limit} IP"; fi
 
-    local link_secret="ee${secret}${domain_hex}"
+    local link_secret
+    if [ "$MASK_ENABLED" == "true" ]; then
+      link_secret="ee${secret}${domain_hex}"
+    else
+      link_secret="$secret"
+    fi
     local link="tg://proxy?server=${display_ip}&port=${display_port}&secret=${link_secret}"
 
     printf "  \033[2m%s · %s\033[0m\n" "$name" "$limit_text"
@@ -569,6 +587,18 @@ function update_from_upstream() {
   fi
 }
 
+function view_logs() {
+  clear
+  printf "  \033[38;2;255;120;0m\033[1mMTProxy-Telemt-tg-ui\033[0m  \033[2m|  Logs\033[0m\n"
+  printf "  \033[2m──────────────────────────────────────────────────────\033[0m\n"
+  printf "  \033[2m(Displaying last 50 lines. Press Ctrl+C to stop following)\033[0m\n\n"
+  
+  cd "$PROJECT_DIR"
+  # Use timeout to allow Ctrl+C to work nicely in loops if needed, 
+  # but standard logs -f is better for interactive use.
+  sudo $DOCKER_COMPOSE logs -f --tail 50
+}
+
 function update_panel() {
   echo
   printf "  \033[1mUpdating management panel\033[0m\n"
@@ -612,7 +642,7 @@ function rotate_secrets() {
   echo
   printf "  \033[33m!\033[0m  This will re-generate ALL secrets for ALL users\n"
   printf "  \033[2mExisting users will need new links to connect\033[0m\n"
-  printf "  are you sure? (y/n): "
+  printf "  are you sure? \033[2m(y/n)\033[0m: "
   read confirm
   if [ "$confirm" == "y" ]; then
     local tmp_db=$(mktemp)
@@ -760,6 +790,7 @@ function advanced_security_menu() {
     printf "  \033[2m6)\033[0m  Mikrotik Cascade (Wireguard)\n"
     printf "  \033[2m7)\033[0m  Remove Cascade Tunnel\n"
     printf "  \033[2m8)\033[0m  Change Server IP  \033[2m(%s)\033[0m\n" "${SERVER_IP:-auto}"
+    printf "  \033[2m9)\033[0m  Promoted Channel (Ad Tag)\n"
     printf "  \033[2m0)\033[0m  Back\n"
     printf "  \033[2m──────────────────────────────────────────────────────\033[0m\n"
     printf "  select: "
@@ -776,6 +807,15 @@ function advanced_security_menu() {
       6) setup_mikrotik_cascade ;;
       7) remove_mikrotik_cascade ;;
       8) select_server_ip ;;
+      9)
+        printf "  Enter Ad Tag (hex) \033[2m[current: %s]\033[0m: " "${AD_TAG}"
+        read adtag_input
+        if [ -n "$adtag_input" ]; then
+          AD_TAG="$adtag_input"
+          save_config_env
+          start_proxy
+        fi
+        ;;
       0) break ;;
     esac
   done
@@ -850,7 +890,7 @@ function setup_mikrotik_cascade() {
   local WG_PORT="51830"
 
   printf "  \033[2mConfiguring external access...\033[0m\n"
-  printf "  Which port to use on Mikrotik for users? [default: 443]: "
+  printf "  Which port to use on Mikrotik for users? \033[2m[default: 443]\033[0m: "
   read ext_port_input
   if [[ "$ext_port_input" =~ ^[0-9]+$ ]]; then
     MIKROTIK_EXT_PORT="$ext_port_input"
@@ -928,7 +968,7 @@ function remove_mikrotik_cascade() {
   fi
 
   printf "  \033[33m!\033[0m  This will remove the Wireguard tunnel and all related configs.\n"
-  printf "  Are you sure? (y/n): "
+  printf "  Are you sure? \033[2m(y/n)\033[0m: "
   read confirm
   if [ "$confirm" != "y" ]; then return; fi
 
@@ -998,6 +1038,12 @@ function toggle_proxy_protocol() {
 }
 
 function show_menu() {
+  # Defensive check: if Docker created a directory here by mistake (happens if file didn't exist during mount)
+  local ram_config="/dev/shm/telemt-tgui-config.toml"
+  if [ -d "$ram_config" ]; then
+    sudo rm -rf "$ram_config"
+  fi
+
   # Auto-fix permissions if running as root or via sudo
   local real_user="${SUDO_USER:-$USER}"
   if [ "$(id -u)" -eq 0 ] && [ "$real_user" != "root" ]; then
@@ -1013,17 +1059,21 @@ function show_menu() {
 
   while true; do
     clear
-    printf "  \033[38;2;255;120;0m\033[1mMTProxy-Telemt-tg-ui\033[0m  \033[2m|  Settings\033[0m\n"
+    printf "  \033[38;2;255;120;0m\033[1mMTProxy-Telemt-tg-ui\033[0m  \033[2m|  Main Menu\033[0m\n"
+    printf "  \033[2m──────────────────────────────────────────────────────\033[0m\n"
     if sudo docker ps | grep -q ${CONTAINER_NAME}; then
-      printf "  \033[2mstatus\033[0m  \033[32m● running\033[0m  \033[2m(port %s)\033[0m\n" "$PORT"
+      printf "  status:  \033[32m● running\033[0m\n"
     else
-      printf "  \033[2mstatus\033[0m  \033[31m○ stopped\033[0m\n"
+      printf "  status:  \033[31m○ stopped\033[0m\n"
     fi
+    printf "  ip:      \033[2m%s\033[0m\n" "${SERVER_IP:-detecting...}"
+    printf "  port:    \033[2m%s\033[0m\n" "$PORT"
+    printf "  sni:     \033[2m%s\033[0m\n" "$FAKE_DOMAIN"
     printf "  \033[2m──────────────────────────────────────────────────────\033[0m\n"
     printf "  \033[2m1)\033[0m  Restart proxy\n"
     printf "  \033[2m2)\033[0m  Change Fake TLS  \033[2m(%s)\033[0m\n" "$FAKE_DOMAIN"
     printf "  \033[2m3)\033[0m  Change port  \033[2m(%s)\033[0m\n" "$PORT"
-      printf "  \033[2m4)\033[0m  Manage links & users\n"
+    printf "  \033[2m4)\033[0m  Manage links & users\n"
     printf "  \033[2m5)\033[0m  Advanced security settings\n"
     printf "  \033[2m6)\033[0m  Update proxy image\n"
     printf "  \033[2m7)\033[0m  Stop proxy\n"
@@ -1058,11 +1108,7 @@ function show_menu() {
         _ok "Service stopped"
         sleep 1
         ;;
-      8)
-        cd "$PROJECT_DIR"
-        sudo $DOCKER_COMPOSE logs --tail 20
-        printf "\n  \033[2mPress Enter to return...\033[0m"; read
-        ;;
+      8) view_logs ;;
       9) update_panel ;;
       0) printf "\n  \033[2mBye!\033[0m\n\n"; exit 0 ;;
       *) _fail "Invalid command"; sleep 1 ;;
@@ -1095,6 +1141,9 @@ elif [ "$1" == "qr" ]; then
   migrate_to_multi_user
   show_qr
   exit 0
+elif [ "$1" == "logs" ]; then
+  view_logs
+  exit 0
 elif [ "$1" == "help" ] || [ -n "$1" ]; then
   echo
   printf "  \033[38;2;255;120;0m\033[1mMTProxy Management Commands\033[0m\n"
@@ -1102,6 +1151,7 @@ elif [ "$1" == "help" ] || [ -n "$1" ]; then
   printf "  \033[33m%-18s\033[0m  \033[2m%s\033[0m\n" "tg-ui"       "Open interactive menu"
   printf "  \033[33m%-18s\033[0m  \033[2m%s\033[0m\n" "tg-ui start" "Start / restart proxy"
   printf "  \033[33m%-18s\033[0m  \033[2m%s\033[0m\n" "tg-ui stop"  "Stop proxy service"
+  printf "  \033[33m%-18s\033[0m  \033[2m%s\033[0m\n" "tg-ui logs"  "View proxy logs"
   printf "  \033[33m%-18s\033[0m  \033[2m%s\033[0m\n" "tg-ui link"  "Show all connection links"
   printf "  \033[33m%-18s\033[0m  \033[2m%s\033[0m\n" "tg-ui qr"    "Generate QR codes for links"
   printf "  \033[33m%-18s\033[0m  \033[2m%s\033[0m\n" "tg-ui update" "Update management tool"

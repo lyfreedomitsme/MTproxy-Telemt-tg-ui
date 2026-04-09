@@ -7,20 +7,20 @@ MTProxy management interface with terminal UI. Built on the [Telemt](https://git
 ## Quick Install
 
 ```bash
-bash <(curl -sL https://raw.githubusercontent.com/lyfreedomitsme/MTproxy-Telmet-tg-ui/master/install.sh)
+bash <(curl -sL https://raw.githubusercontent.com/lyfreedomitsme/MTproxy-Telemt-tg-ui/master/install.sh)
 ```
-*Installs Docker, dependencies, and registers `tg-ui` as a global command.*
+*Installs Docker, dependencies (`git`, `xxd`, `qrencode`), and registers `tg-ui` as a global command.*
 
 ---
 
 ## Quick Update (Preserve Settings)
 
-If you already have `tg-ui` installed and want to update to the latest version **without losing your users, secrets, or IP settings**, run:
+To update to the latest version **without losing users, secrets, or settings**, run:
 
 ```bash
 bash <(curl -sL https://raw.githubusercontent.com/lyfreedomitsme/MTproxy-Telmet-tg-ui/master/install.sh) --update
 ```
-*Alternatively, use the **Update Panel** option in the interactive menu.*
+*Alternatively, use the **Update Panel** option (`9`) in the interactive menu.*
 
 ---
 
@@ -32,6 +32,7 @@ tg-ui start        Start / restart proxy
 tg-ui stop         Stop proxy service
 tg-ui link         Show all connection links
 tg-ui qr           Generate QR codes for links
+tg-ui logs         Tail proxy logs (Ctrl+C to stop)
 tg-ui update       Update management tool
 tg-ui help         Show this help message
 ```
@@ -40,41 +41,43 @@ tg-ui help         Show this help message
 
 ## Key Features
 
-- **Multi-user Accounting**: Each user gets a unique secret and optional IP connection limit.
-- **Mikrotik Cascade**: Automated WireGuard tunnel setup between Ubuntu and Mikrotik to bypass NAT and preserve real client IPs for accounting.
-- **Manual IP Selection**: Choose which server IP to use for links/QR codes if your server has multiple interfaces.
-- **Anti-DPI Hardening**: Pre-configured with SNI masking (Fake TLS) and active probing resistance.
-- **Performance**: Written for speed with RAM-only configuration files (`/dev/shm`).
+- **Multi-user Accounting**: Each user gets a unique secret and an optional IP connection limit.
+- **Active Masking (Fake TLS / SNI)**: Disguises traffic as HTTPS using a configurable domain. Can be enabled or disabled per deployment.
+- **Mikrotik Cascade**: Automated WireGuard tunnel setup between Ubuntu and Mikrotik to bypass NAT and pass real client IPs for per-user accounting.
+- **Ad Channel Tag**: Promote a Telegram channel via `@MTProxybot` by setting an `AD_TAG`.
+- **RAM-only Config**: Proxy configuration is held in `/dev/shm` — never touches disk at runtime.
 - **Resilience**: Automatic autostart after server reboots via `@reboot` cron.
+- **QR Codes**: Built-in QR code generation for connection links (`qrencode` required).
 
 ---
 
 ## Advanced: Mikrotik Cascade
 
-If your server sits behind a Mikrotik router, standard NAT will make all users appear as the router's IP, breaking connection limits. 
+When a server sits behind a Mikrotik router, all clients appear with the router's IP, which breaks per-user connection limits.
 
-**Solution**: Go to `5) Advanced security settings` -> `6) Mikrotik Cascade`. 
-1. The script will automatically configure a WireGuard tunnel (`wg-telemt`).
-2. It generates a `.txt` file with exact commands to paste into your Mikrotik terminal.
-3. Once active, all links will automatically use your Mikrotik's public IP.
+**Solution**: Go to `5) Advanced security settings` → `6) Mikrotik Cascade`.
+1. The script configures a WireGuard tunnel (`wg-telemt`) on the Ubuntu server.
+2. A `.txt` file is generated with exact commands to paste into the Mikrotik terminal.
+3. Once active, connection links automatically switch to the Mikrotik's public IP.
+
+> **Note on IP Limits with Cascade**: Connection limits are enforced at the proxy level based on the source IP the proxy receives. When using the WireGuard cascade, the proxy sees real client IPs (not the Mikrotik's IP), so per-user limits work correctly.
 
 ---
 
 ## Security
 
-- Container runs as a non-root user with a read-only filesystem.
-- Secrets are generated using `openssl rand`.
-- Configuration database and environment files are protected with strict permissions.
+- Container runs as a non-root user (`65534:65534`) with a read-only filesystem.
+- Secrets are generated using `openssl rand` (16 bytes = 32 hex chars).
+- Environment files are protected with strict permissions (`644`).
+- Supports `PROXY_PROTOCOL` mode to receive real client IPs from upstream load balancers.
 
 ---
 
 ## Clean Uninstall
 
-To remove the project and all associated data:
-
 ```bash
 docker rm -f telemt-proxy; \
-rm -f /usr/local/bin/tg-ui; \
+sudo rm -f /usr/local/bin/tg-ui; \
 rm -f ~/.telemt-ui-config.env; \
 crontab -l | grep -v "tg-ui" | crontab -
 ```
