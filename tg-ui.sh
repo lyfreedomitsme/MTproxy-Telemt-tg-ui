@@ -1132,8 +1132,7 @@ function show_menu() {
     fi
     if _is_cascade_active; then
       local _cascade_ip=$(_get_cascade_ip)
-      printf "  cascade: \033[32m● active\033[0m  \033[2m%s:%s\033[0m\n" "$_cascade_ip" "$MIKROTIK_EXT_PORT"
-      printf "  ip:      \033[2m%s\033[0m  \033[2m(direct)\033[0m\n" "${SERVER_IP:-detecting...}"
+      printf "  ip:      \033[2m%s\033[0m  \033[32m(cascade: %s:%s)\033[0m\n" "${SERVER_IP:-detecting...}" "$_cascade_ip" "$MIKROTIK_EXT_PORT"
     else
       printf "  ip:      \033[2m%s\033[0m\n" "${SERVER_IP:-detecting...}"
     fi
