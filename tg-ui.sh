@@ -945,7 +945,23 @@ EOF
 EOF
   
   systemctl enable --now wg-quick@wg-telemt &> /dev/null || true
-  
+  sleep 1
+
+  if ! ip link show wg-telemt &>/dev/null; then
+    printf "  \033[31mx\033[0m  WireGuard interface failed to start.\n"
+    printf "     Check: \033[2msystemctl status wg-quick@wg-telemt\033[0m\n"
+    read -p "  Press Enter to return..."
+    return
+  fi
+
+  # Open WireGuard UDP port in firewall
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "active"; then
+    ufw allow "$WG_PORT/udp" comment "Telemt WireGuard" >/dev/null 2>&1 && \
+      printf "  \033[32m✔\033[0m  UFW: opened port %s/udp\n" "$WG_PORT"
+  fi
+  iptables -C INPUT -p udp --dport "$WG_PORT" -j ACCEPT 2>/dev/null || \
+    iptables -I INPUT -p udp --dport "$WG_PORT" -j ACCEPT
+
   printf "  \033[32m✔\033[0m  Ubuntu WG Tunnel (wg-telemt) started successfully!\n\n"
   
   printf "  ${ORANGE}${BOLD}Now, open your Mikrotik Terminal and paste these exact commands:${RESET}\n"
@@ -985,6 +1001,8 @@ function remove_mikrotik_cascade() {
     return
   fi
 
+  local WG_PORT="51830"
+
   printf "  \033[33m!\033[0m  This will remove the Wireguard tunnel and all related configs.\n"
   printf "  Are you sure? \033[2m(y/n)\033[0m: "
   read confirm
@@ -993,13 +1011,26 @@ function remove_mikrotik_cascade() {
   printf "  \033[2mStopping Wireguard interface...\033[0m\n"
   systemctl disable --now wg-quick@wg-telemt &>/dev/null || true
   ip link delete wg-telemt &>/dev/null || true
-  
-  # Note: 200 wg_table is left in rt_tables to avoid messing up other possible tunnels,
-  # but the rules and routes are deleted by PostDown/systemctl.
+
+  # Close WireGuard UDP port in firewall
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "active"; then
+    ufw delete allow "$WG_PORT/udp" >/dev/null 2>&1 || true
+  fi
+  iptables -D INPUT -p udp --dport "$WG_PORT" -j ACCEPT 2>/dev/null || true
 
   rm -f "$CONF_FILE" "$MIKROTIK_TXT"
   _ok "Cascade tunnel removed successfully"
-  sleep 2
+
+  printf "\n  ${ORANGE}${BOLD}Now clean up your Mikrotik — paste these commands in Mikrotik Terminal:${RESET}\n"
+  printf "  \033[2m──────────────────────────────────────────────────────────────\033[0m\n"
+  printf "  ${CYAN}/ip firewall nat remove [find comment=\"Telemt Cascade\"]${RESET}\n"
+  printf "  ${CYAN}/ip address remove [find comment=\"Telemt Cascade\"]${RESET}\n"
+  printf "  ${CYAN}/interface wireguard peers remove [find comment=\"Telemt Cascade\"]${RESET}\n"
+  printf "  ${CYAN}/interface wireguard remove [find comment=\"Telemt Cascade\"]${RESET}\n"
+  printf "  \033[2m──────────────────────────────────────────────────────────────\033[0m\n\n"
+  printf "  \033[2mThese commands remove all Telemt Cascade rules by comment tag.\033[0m\n\n"
+
+  read -p "  Press Enter to return..."
 }
 
 function sync_mikrotik_commands() {
