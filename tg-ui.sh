@@ -928,17 +928,17 @@ Address = $WG_IP_SERVER/24
 ListenPort = $WG_PORT
 Table = off
 PostUp = grep -q "200 wg_table" /etc/iproute2/rt_tables || echo "200 wg_table" >> /etc/iproute2/rt_tables
-PostUp = ip rule del from $WG_IP_SERVER table wg_table 2>/dev/null; ip rule add from $WG_IP_SERVER table wg_table
-PostUp = ip route del default dev wg-telemt table wg_table 2>/dev/null; ip route add default dev wg-telemt table wg_table
+PostUp = ip rule del from $WG_IP_SERVER table 200 2>/dev/null; ip rule add from $WG_IP_SERVER table 200 priority 100
+PostUp = ip route del default dev wg-telemt table 200 2>/dev/null; ip route add default dev wg-telemt table 200
 PostUp = iptables -t mangle -D PREROUTING -i wg-telemt ! -s $WG_IP_MIKROTIK -j CONNMARK --set-mark 200 2>/dev/null; iptables -t mangle -A PREROUTING -i wg-telemt ! -s $WG_IP_MIKROTIK -j CONNMARK --set-mark 200
 PostUp = iptables -t mangle -D PREROUTING -m connmark --mark 200 -j MARK --set-mark 200 2>/dev/null; iptables -t mangle -A PREROUTING -m connmark --mark 200 -j MARK --set-mark 200
-PostUp = ip rule del fwmark 200 table wg_table priority 90 2>/dev/null; ip rule add fwmark 200 table wg_table priority 90
+PostUp = ip rule del fwmark 200 table 200 priority 90 2>/dev/null; ip rule add fwmark 200 table 200 priority 90
 PostUp = iptables -t nat -I POSTROUTING 1 -o wg-telemt -m connmark --mark 200 -j SNAT --to-source $WG_IP_SERVER
-PostDown = ip rule del from $WG_IP_SERVER table wg_table || true
-PostDown = ip route del default dev wg-telemt table wg_table || true
+PostDown = ip rule del from $WG_IP_SERVER table 200 2>/dev/null || true
+PostDown = ip route del default dev wg-telemt table 200 2>/dev/null || true
 PostDown = iptables -t mangle -D PREROUTING -i wg-telemt ! -s $WG_IP_MIKROTIK -j CONNMARK --set-mark 200 || true
 PostDown = iptables -t mangle -D PREROUTING -m connmark --mark 200 -j MARK --set-mark 200 || true
-PostDown = ip rule del fwmark 200 table wg_table priority 90 || true
+PostDown = ip rule del fwmark 200 table 200 priority 90 2>/dev/null || true
 PostDown = iptables -t nat -D POSTROUTING -o wg-telemt -m connmark --mark 200 -j SNAT --to-source $WG_IP_SERVER || true
 
 [Peer]
@@ -1075,8 +1075,8 @@ EOF
       iptables -t mangle -A PREROUTING -i wg-telemt ! -s "$WG_IP_MIKROTIK" -j CONNMARK --set-mark 200
     iptables -t mangle -C PREROUTING -m connmark --mark 200 -j MARK --set-mark 200 2>/dev/null || \
       iptables -t mangle -A PREROUTING -m connmark --mark 200 -j MARK --set-mark 200
-    ip rule show | grep -q "fwmark 0xc8 lookup wg_table" || \
-      ip rule add fwmark 200 table wg_table priority 90 2>/dev/null || true
+    ip rule show | grep -q "fwmark 0xc8 lookup 200" || ip rule show | grep -q "fwmark 0xc8 lookup wg_table" || \
+      ip rule add fwmark 200 table 200 priority 90 2>/dev/null || true
     iptables -t nat -C POSTROUTING -o wg-telemt -m connmark --mark 200 -j SNAT --to-source "$WG_IP_SERVER" 2>/dev/null || \
       iptables -t nat -I POSTROUTING 1 -o wg-telemt -m connmark --mark 200 -j SNAT --to-source "$WG_IP_SERVER"
   fi
