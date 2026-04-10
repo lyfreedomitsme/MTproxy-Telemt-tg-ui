@@ -430,6 +430,20 @@ function show_link() {
 
 function show_qr() {
   local target_user=$1
+
+  if ! command -v qrencode >/dev/null 2>&1; then
+    printf "  \033[33m⚙\033[0m  Installing qrencode...\n"
+    if command -v apt-get >/dev/null 2>&1; then
+      sudo apt-get install -y qrencode >/dev/null 2>&1
+    elif command -v yum >/dev/null 2>&1; then
+      sudo yum install -y qrencode >/dev/null 2>&1
+    fi
+    if ! command -v qrencode >/dev/null 2>&1; then
+      printf "  \033[31m✗\033[0m  Failed to install qrencode. Run: sudo apt-get install -y qrencode\n"
+      printf "  \033[2mPress Enter to return...\033[0m"; read; return
+    fi
+  fi
+
   _fetch_ip
 
   local display_ip="$SERVER_IP"
@@ -469,17 +483,13 @@ function show_qr() {
     printf "  \033[2m%s · %s\033[0m\n" "$name" "$limit_text"
     echo
 
-    if ! command -v qrencode >/dev/null 2>&1; then
-      printf "  \033[31m✗\033[0m  qrencode not found\n"
-    else
-      qr_output=$(qrencode -t UTF8i -m 2 "$link")
-      first_line=$(head -n 1 <<< "$qr_output")
-      qr_width=${#first_line}
-      padding=$(( (60 - qr_width) / 2 ))
-      [ $padding -lt 0 ] && padding=0
-      pad_str=$(printf "%*s" $padding "")
-      echo "$qr_output" | sed "s/^/$pad_str/"
-    fi
+    qr_output=$(qrencode -t UTF8i -m 2 "$link")
+    first_line=$(head -n 1 <<< "$qr_output")
+    qr_width=${#first_line}
+    padding=$(( (60 - qr_width) / 2 ))
+    [ $padding -lt 0 ] && padding=0
+    pad_str=$(printf "%*s" $padding "")
+    echo "$qr_output" | sed "s/^/$pad_str/"
 
     printf "  \033[2m──────────────────────────────────────────────────────\033[0m\n"
     ((current++))
