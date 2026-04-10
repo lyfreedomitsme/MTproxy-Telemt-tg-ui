@@ -2,7 +2,7 @@
 
 MTProxy management interface with terminal UI. Built on the [Telemt](https://github.com/telemt/telemt) engine — adds multi-user support, DPI resistance, SNI masking, and an automated Mikrotik cascade tunnel.
 
-**Version: 1.0.0 (Stable)**
+**Version: 1.0.0 (STABLE)**
 
 ---
 
