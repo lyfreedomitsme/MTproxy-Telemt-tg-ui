@@ -124,7 +124,7 @@ To completely remove MTproxy-Telemt-tg-ui:
 ```bash
 docker rm -f telemt-proxy
 sudo rm -f /usr/local/bin/tg-ui
-rm -rf ~/telemt-plus
+rm -rf ~/MTproxy-Telamt-tg-ui
 rm -f ~/.telemt-ui-config.env
 crontab -l | grep -v "tg-ui" | crontab -
 ```
