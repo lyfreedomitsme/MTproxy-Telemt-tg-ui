@@ -601,12 +601,14 @@ function view_logs() {
   clear
   printf "  \033[38;2;255;120;0m\033[1mMTProxy-Telemt-tg-ui\033[0m  \033[2m|  Logs\033[0m\n"
   printf "  \033[2m──────────────────────────────────────────────────────\033[0m\n"
-  printf "  \033[2m(Displaying last 50 lines. Press Ctrl+C to stop following)\033[0m\n\n"
-  
+  printf "  \033[2m(Live feed · Press Enter to return)\033[0m\n\n"
+
   cd "$PROJECT_DIR"
-  # Use timeout to allow Ctrl+C to work nicely in loops if needed, 
-  # but standard logs -f is better for interactive use.
-  sudo $DOCKER_COMPOSE logs -f --tail 50
+  sudo $DOCKER_COMPOSE logs -f --tail 50 &
+  local logs_pid=$!
+  read
+  kill "$logs_pid" 2>/dev/null
+  wait "$logs_pid" 2>/dev/null
 }
 
 function update_panel() {
@@ -616,8 +618,8 @@ function update_panel() {
   if [ -d ".git" ]; then
     if git pull; then
       _ok "Panel updated from Git"
-      printf "  \033[33m!\033[0m  Please restart the script to apply changes.\n"
-      sleep 2
+      sleep 1
+      exec tg-ui
     else
       _fail "Git pull failed"
     fi
@@ -876,6 +878,7 @@ function setup_mikrotik_cascade() {
     printf "  \033[31mx\033[0m  Cascade tunnel (wg-telemt) already exists!\n"
     printf "     Config path: \033[2m%s\033[0m\n" "$CONF_FILE"
     if [ -f "$MIKROTIK_TXT" ]; then
+      sync_mikrotik_commands
       printf "\n  ${BOLD}Mikrotik Commands:${RESET}\n"
       printf "  \033[2m──────────────────────────────────────────────────────────────\033[0m\n"
       while IFS= read -r line; do
