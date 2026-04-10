@@ -517,9 +517,6 @@ function manage_users() {
     done < "$USERS_DB"
 
     printf "  \033[2m──────────────────────────────────────────────────────\033[0m\n"
-    if _is_cascade_active; then
-      printf "  \033[33m!\033[0m  \033[2mCascade active: IP limits do not work (all traffic via Mikrotik)\033[0m\n"
-    fi
     printf "  \033[2m1)\033[0m  Add new link\n"
     printf "  \033[2m2)\033[0m  Delete link\n"
     printf "  \033[2m3)\033[0m  Change IP limit\n"
@@ -922,8 +919,16 @@ Table = off
 PostUp = grep -q "200 wg_table" /etc/iproute2/rt_tables || echo "200 wg_table" >> /etc/iproute2/rt_tables
 PostUp = ip rule add from $WG_IP_SERVER table wg_table
 PostUp = ip route add default dev wg-telemt table wg_table
+PostUp = iptables -t mangle -A PREROUTING -i wg-telemt ! -s $WG_IP_MIKROTIK -j CONNMARK --set-mark 200
+PostUp = iptables -t mangle -A PREROUTING -m connmark --mark 200 -j MARK --set-mark 200
+PostUp = ip rule add fwmark 200 table wg_table priority 90
+PostUp = iptables -t nat -I POSTROUTING 1 -o wg-telemt -m connmark --mark 200 -j SNAT --to-source $WG_IP_SERVER
 PostDown = ip rule del from $WG_IP_SERVER table wg_table || true
 PostDown = ip route del default dev wg-telemt table wg_table || true
+PostDown = iptables -t mangle -D PREROUTING -i wg-telemt ! -s $WG_IP_MIKROTIK -j CONNMARK --set-mark 200 || true
+PostDown = iptables -t mangle -D PREROUTING -m connmark --mark 200 -j MARK --set-mark 200 || true
+PostDown = ip rule del fwmark 200 table wg_table priority 90 || true
+PostDown = iptables -t nat -D POSTROUTING -o wg-telemt -m connmark --mark 200 -j SNAT --to-source $WG_IP_SERVER || true
 
 [Peer]
 PublicKey = $MIKROTIK_PUB
@@ -1001,6 +1006,9 @@ function sync_mikrotik_commands() {
   local WG_DIR="/etc/wireguard"
   local CONF_FILE="$WG_DIR/wg-telemt.conf"
   local MIKROTIK_TXT="$WG_DIR/wg-telemt-mikrotik.txt"
+  local WG_IP_SERVER="10.99.99.1"
+  local WG_IP_MIKROTIK="10.99.99.2"
+  local WG_PORT="51830"
 
   [ ! -f "$CONF_FILE" ] && return
   [ ! -f "$MIKROTIK_TXT" ] && return
@@ -1010,14 +1018,26 @@ function sync_mikrotik_commands() {
   local SERVER_PUB=$(grep "PrivateKey" "$CONF_FILE" | awk '{print $3}' | wg pubkey)
   local MIKROTIK_PRIV=$(grep -oP '/interface wireguard add .* private-key="\K[^"]+' "$MIKROTIK_TXT" 2>/dev/null || echo "PLACEHOLDER")
 
-  # Regenerate TXT file with current IP and Current Proxy Port
+  # Regenerate TXT file with current IP and current proxy port
   sudo tee "$MIKROTIK_TXT" >/dev/null <<EOF
 /interface wireguard add comment="Telemt Cascade" listen-port=13231 name=wg-telemt private-key="$MIKROTIK_PRIV"
-/interface wireguard peers add allowed-address=0.0.0.0/0 comment="Telemt Cascade" endpoint-address=$DISPLAY_IP endpoint-port=51830 interface=wg-telemt public-key="$SERVER_PUB"
-/ip address add address=10.99.99.2/24 comment="Telemt Cascade" interface=wg-telemt
+/interface wireguard peers add allowed-address=0.0.0.0/0 comment="Telemt Cascade" endpoint-address=$DISPLAY_IP endpoint-port=$WG_PORT interface=wg-telemt public-key="$SERVER_PUB"
+/ip address add address=$WG_IP_MIKROTIK/24 comment="Telemt Cascade" interface=wg-telemt
 /ip firewall nat add action=accept chain=srcnat comment="Telemt Cascade" protocol=tcp dst-port=$PORT out-interface=wg-telemt place-before=0
-/ip firewall nat add action=dst-nat chain=dstnat comment="Telemt Cascade" protocol=tcp dst-port=$MIKROTIK_EXT_PORT in-interface=ether1 to-addresses=10.99.99.1 to-ports=$PORT
+/ip firewall nat add action=dst-nat chain=dstnat comment="Telemt Cascade" protocol=tcp dst-port=$MIKROTIK_EXT_PORT in-interface=ether1 to-addresses=$WG_IP_SERVER to-ports=$PORT
 EOF
+
+  # Ensure transparent IP forwarding rules are active (idempotent - for existing setups)
+  if ip link show wg-telemt &>/dev/null; then
+    iptables -t mangle -C PREROUTING -i wg-telemt ! -s "$WG_IP_MIKROTIK" -j CONNMARK --set-mark 200 2>/dev/null || \
+      iptables -t mangle -A PREROUTING -i wg-telemt ! -s "$WG_IP_MIKROTIK" -j CONNMARK --set-mark 200
+    iptables -t mangle -C PREROUTING -m connmark --mark 200 -j MARK --set-mark 200 2>/dev/null || \
+      iptables -t mangle -A PREROUTING -m connmark --mark 200 -j MARK --set-mark 200
+    ip rule show | grep -q "fwmark 0xc8 lookup wg_table" || \
+      ip rule add fwmark 200 table wg_table priority 90 2>/dev/null || true
+    iptables -t nat -C POSTROUTING -o wg-telemt -m connmark --mark 200 -j SNAT --to-source "$WG_IP_SERVER" 2>/dev/null || \
+      iptables -t nat -I POSTROUTING 1 -o wg-telemt -m connmark --mark 200 -j SNAT --to-source "$WG_IP_SERVER"
+  fi
 }
 
 function toggle_proxy_protocol() {
