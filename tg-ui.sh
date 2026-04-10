@@ -378,7 +378,7 @@ function _fetch_ip() {
 function _is_cascade_active() {
   [ -f "/etc/wireguard/wg-telemt.conf" ] && \
   ip link show wg-telemt &>/dev/null && \
-  wg show wg-telemt 2>/dev/null | grep -q "latest handshake"
+  sudo wg show wg-telemt endpoints 2>/dev/null | grep -qv "(none)"
 }
 
 function _get_cascade_ip() {
@@ -868,7 +868,7 @@ function setup_mikrotik_cascade() {
   
   if [ -f "$CONF_FILE" ]; then
     local pbr_status="\033[31m○ offline\033[0m"
-    if ip rule show | grep -q "table wg_table" && ip route show table wg_table | grep -q "default" && ip link show wg-telemt &>/dev/null; then
+    if ip link show wg-telemt &>/dev/null && ip rule show 2>/dev/null | grep -q "wg_table"; then
       pbr_status="\033[32m● running\033[0m"
     fi
 
