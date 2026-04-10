@@ -112,6 +112,19 @@ fi
 if [[ "${BASH_SOURCE[0]}" == "/dev/fd/"* ]]; then
     if [ -f "tg-ui.sh" ]; then
         PROJECT_DIR=$(pwd)
+        # Update mode: pull latest code if this is a git repo
+        if [ "$UPDATE_MODE" == "true" ] && [ -d ".git" ]; then
+            echo
+            printf "  \033[1mPulling latest code\033[0m\n"
+            run_with_spinner "git pull" git pull
+        fi
+    elif [ "$UPDATE_MODE" == "true" ] && [ -d "$INSTALL_DIR/.git" ]; then
+        # Update mode from outside project dir: pull instead of wipe (preserve configs)
+        echo
+        printf "  \033[1mPulling latest code\033[0m\n"
+        run_with_spinner "git pull" git -C "$INSTALL_DIR" pull
+        cd "$INSTALL_DIR"
+        PROJECT_DIR=$(pwd)
     else
         echo
         printf "  \033[1mCloning repository\033[0m\n"
