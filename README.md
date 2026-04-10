@@ -119,7 +119,7 @@ If the proxy port is in use, change it via menu option `3) Change port` or direc
 
 ## Clean Uninstall
 
-To completely remove MTProxy Telemt-Plus:
+To completely remove MTproxy-Telemt-tg-ui:
 
 ```bash
 docker rm -f telemt-proxy

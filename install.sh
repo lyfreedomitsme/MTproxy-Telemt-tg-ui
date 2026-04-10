@@ -1,6 +1,6 @@
 #!/bin/bash
 # ══════════════════════════════════════════════════════════════
-# MTProxy Telemt-Plus - Installer v1.0.0 STABLE
+# MTproxy-Telemt-tg-ui - Installer v1.0.0 STABLE
 # ══════════════════════════════════════════════════════════════
 set -e
 
