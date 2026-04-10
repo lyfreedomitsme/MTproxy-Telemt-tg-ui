@@ -12,7 +12,7 @@ fi
 REPO_URL="https://github.com/lyfreedomitsme/MTproxy-Telemt-tg-ui.git"
 INSTALL_DIR="$HOME/telemt-plus"
 
-# ── Colors (Claude Code palette) ─────────────────────────────
+# ── Colors ────────────────────────────────────────────────────
 RESET='\033[0m'
 BOLD='\033[1m'
 DIM='\033[2m'

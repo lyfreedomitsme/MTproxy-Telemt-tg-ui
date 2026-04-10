@@ -14,14 +14,14 @@ BLUE='\033[38;2;0;120;255m'
 ORANGE='\033[38;2;255;120;0m'
 NC='\033[0m'
 
-# ── UI helpers (Claude Code style) ───────────────────────────
+# UI helpers
 _ok()   { printf "  \033[32m✓\033[0m  \033[2m%s\033[0m\n" "$1"; }
 _fail() { printf "  \033[31m✗\033[0m  %s\n" "$1"; }
 _log()  { printf "  \033[2m%s\033[0m\n" "$1"; }
 _spin() { printf "\r  \033[32m%s\033[0m  \033[2m%s\033[0m" "$1" "$2"; }
 _spin_ok() { printf "\r  \033[32m✓\033[0m  \033[2m%-55s\033[0m\n" "$1"; }
 
-# Legacy aliases kept for any remaining callers
+# Legacy aliases
 ok()   { _ok "$1"; }
 fail() { _fail "$1"; }
 info() { _log "$1"; }
