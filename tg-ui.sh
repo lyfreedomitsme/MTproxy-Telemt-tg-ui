@@ -412,7 +412,7 @@ function show_link() {
     if [ -n "$target_user" ] && [ "$target_user" != "$name" ]; then continue; fi
 
     local limit_text
-    if [ "$limit" -eq "0" ]; then limit_text="unlimited"; else limit_text="${limit} IP"; fi
+    if [ "${limit:-0}" -eq "0" ]; then limit_text="unlimited"; else limit_text="${limit} IP"; fi
 
     local link_secret
     if [ "$MASK_ENABLED" == "true" ]; then
@@ -470,7 +470,7 @@ function show_qr() {
     if [ -n "$target_user" ] && [ "$target_user" != "$name" ]; then continue; fi
 
     local limit_text
-    if [ "$limit" -eq "0" ]; then limit_text="unlimited"; else limit_text="${limit} IP"; fi
+    if [ "${limit:-0}" -eq "0" ]; then limit_text="unlimited"; else limit_text="${limit} IP"; fi
 
     local link_secret
     if [ "$MASK_ENABLED" == "true" ]; then
@@ -517,6 +517,9 @@ function manage_users() {
     done < "$USERS_DB"
 
     printf "  \033[2m──────────────────────────────────────────────────────\033[0m\n"
+    if _is_cascade_active; then
+      printf "  \033[33m!\033[0m  \033[2mCascade active: IP limits do not work (all traffic via Mikrotik)\033[0m\n"
+    fi
     printf "  \033[2m1)\033[0m  Add new link\n"
     printf "  \033[2m2)\033[0m  Delete link\n"
     printf "  \033[2m3)\033[0m  Change IP limit\n"
@@ -1062,7 +1065,7 @@ function show_menu() {
     chmod 644 "$PROJECT_DIR/.env" "$CONFIG_FILE"
   fi
 
-  if ! sudo docker ps | grep -q ${CONTAINER_NAME}; then
+  if ! sudo docker ps | grep -q "${CONTAINER_NAME}"; then
     start_proxy
     sleep 1
   fi
@@ -1071,7 +1074,7 @@ function show_menu() {
     clear
     printf "  \033[38;2;255;120;0m\033[1mMTProxy-Telemt-tg-ui\033[0m  \033[2m|  Main Menu\033[0m\n"
     printf "  \033[2m──────────────────────────────────────────────────────\033[0m\n"
-    if sudo docker ps | grep -q ${CONTAINER_NAME}; then
+    if sudo docker ps | grep -q "${CONTAINER_NAME}"; then
       printf "  status:  \033[32m● running\033[0m\n"
     else
       printf "  status:  \033[31m○ stopped\033[0m\n"
