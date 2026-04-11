@@ -872,16 +872,29 @@ function setup_mikrotik_cascade() {
     fi
 
     # Patch existing config if missing docker restart command
+    local config_updated=false
     if ! grep -q "docker restart.*telemt-proxy" "$CONF_FILE" 2>/dev/null; then
       printf "  \033[2mPatching config to auto-restart Docker container on WireGuard events...\033[0m\n"
       sed -i '/^PostUp = iptables -t nat -I POSTROUTING 1 -o wg-telemt -m connmark --mark 200 -j SNAT --to-source/a PostUp = docker restart telemt-proxy 2>\/dev\/null || true' "$CONF_FILE"
-      # Reload WireGuard to apply the new PostUp rule
-      if ip link show wg-telemt &>/dev/null; then
-        wg-quick down wg-telemt >/dev/null 2>&1
-        sleep 1
-        wg-quick up wg-telemt >/dev/null 2>&1
-        printf "  \033[32m✔\033[0m  WireGuard config patched and reloaded\n"
-      fi
+      config_updated=true
+      printf "  \033[32m✔\033[0m  WireGuard config patched\n"
+    fi
+
+    # Ensure systemd service is enabled for auto-start on reboot
+    if ! systemctl is-enabled wg-quick@wg-telemt &>/dev/null; then
+      printf "  \033[2mEnabling WireGuard auto-start on system reboot...\033[0m\n"
+      systemctl enable wg-quick@wg-telemt >/dev/null 2>&1
+      printf "  \033[32m✔\033[0m  WireGuard will auto-start on reboot\n"
+      config_updated=true
+    fi
+
+    # Reload WireGuard if config was updated
+    if [ "$config_updated" = true ] && ip link show wg-telemt &>/dev/null; then
+      printf "  \033[2mReloading WireGuard to apply updates...\033[0m\n"
+      wg-quick down wg-telemt >/dev/null 2>&1
+      sleep 1
+      wg-quick up wg-telemt >/dev/null 2>&1
+      printf "  \033[32m✔\033[0m  WireGuard reloaded\n"
     fi
 
     printf "  \033[2mstatus\033[0m  %b\n" "$pbr_status"
