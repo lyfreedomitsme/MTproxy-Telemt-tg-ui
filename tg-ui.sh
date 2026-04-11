@@ -871,6 +871,19 @@ function setup_mikrotik_cascade() {
       pbr_status="\033[32m● running\033[0m"
     fi
 
+    # Patch existing config if missing docker restart command
+    if ! grep -q "docker restart.*telemt-proxy" "$CONF_FILE" 2>/dev/null; then
+      printf "  \033[2mPatching config to auto-restart Docker container on WireGuard events...\033[0m\n"
+      sed -i '/^PostUp = iptables -t nat -I POSTROUTING 1 -o wg-telemt -m connmark --mark 200 -j SNAT --to-source/a PostUp = docker restart telemt-proxy 2>\/dev\/null || true' "$CONF_FILE"
+      # Reload WireGuard to apply the new PostUp rule
+      if ip link show wg-telemt &>/dev/null; then
+        wg-quick down wg-telemt >/dev/null 2>&1
+        sleep 1
+        wg-quick up wg-telemt >/dev/null 2>&1
+        printf "  \033[32m✔\033[0m  WireGuard config patched and reloaded\n"
+      fi
+    fi
+
     printf "  \033[2mstatus\033[0m  %b\n" "$pbr_status"
     printf "  \033[31mx\033[0m  Cascade tunnel (wg-telemt) already exists!\n"
     printf "     Config path: \033[2m%s\033[0m\n" "$CONF_FILE"
@@ -927,6 +940,7 @@ PostUp = iptables -t mangle -A PREROUTING -m connmark --mark 200 -j MARK --set-m
 PostUp = ip rule del fwmark 200 table 200 priority 90 2>/dev/null || true
 PostUp = ip rule add fwmark 200 table 200 priority 90
 PostUp = iptables -t nat -I POSTROUTING 1 -o wg-telemt -m connmark --mark 200 -j SNAT --to-source $WG_IP_SERVER
+PostUp = docker restart ${CONTAINER_NAME} 2>/dev/null || true
 PostDown = ip rule del from $WG_IP_SERVER table 200 2>/dev/null || true
 PostDown = ip route del default dev wg-telemt table 200 2>/dev/null || true
 PostDown = iptables -t mangle -D PREROUTING -i wg-telemt ! -s $WG_IP_MIKROTIK -j CONNMARK --set-mark 200 || true
