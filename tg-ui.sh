@@ -1167,12 +1167,12 @@ ListenPort = $WG_PORT
 Table = off
 PostUp = ip6tables -t mangle -A PREROUTING -i wg-telemt ! -s $WG_IP_MIKROTIK -j CONNMARK --set-mark 200
 PostUp = ip6tables -t mangle -A PREROUTING -m connmark --mark 200 -j MARK --set-mark 200
-PostUp = ip rule add fwmark 200 table 200 priority 90 2>/dev/null || true
+PostUp = ip -6 rule add fwmark 200 table 200 priority 90 2>/dev/null || true
 PostUp = ip6tables -t nat -I POSTROUTING 1 -o wg-telemt -m connmark --mark 200 -j SNAT --to-source $WG_IP_SERVER
 PostUp = (sleep 0.5; docker restart ${CONTAINER_NAME}) > /dev/null 2>&1 &
 PostDown = ip6tables -t mangle -D PREROUTING -i wg-telemt ! -s $WG_IP_MIKROTIK -j CONNMARK --set-mark 200 || true
 PostDown = ip6tables -t mangle -D PREROUTING -m connmark --mark 200 -j MARK --set-mark 200 || true
-PostDown = ip rule del fwmark 200 table 200 priority 90 2>/dev/null || true
+PostDown = ip -6 rule del fwmark 200 table 200 priority 90 2>/dev/null || true
 PostDown = ip6tables -t nat -D POSTROUTING -o wg-telemt -m connmark --mark 200 -j SNAT --to-source $WG_IP_SERVER || true
 
 [Peer]
@@ -1305,6 +1305,12 @@ function remove_mikrotik_cascade() {
 
   local WG_PORT="51830"
 
+  # Detect cascade type before removal
+  local CASCADE_COMMENT="Telemt Cascade"
+  if grep -q "IPv6" "$MIKROTIK_TXT" 2>/dev/null; then
+    CASCADE_COMMENT="Telemt Cascade IPv6"
+  fi
+
   printf "  \033[33m!\033[0m  This will remove the Wireguard tunnel and all related configs.\n"
   printf "  Are you sure? \033[2m(y/n)\033[0m: "
   read confirm
@@ -1325,10 +1331,10 @@ function remove_mikrotik_cascade() {
 
   printf "\n  ${ORANGE}${BOLD}Now clean up your Mikrotik — paste these commands in Mikrotik Terminal:${RESET}\n"
   printf "  \033[2m──────────────────────────────────────────────────────────────\033[0m\n"
-  printf "  ${CYAN}/ip firewall nat remove [find comment=\"Telemt Cascade\"]${RESET}\n"
-  printf "  ${CYAN}/ip address remove [find comment=\"Telemt Cascade\"]${RESET}\n"
-  printf "  ${CYAN}/interface wireguard peers remove [find comment=\"Telemt Cascade\"]${RESET}\n"
-  printf "  ${CYAN}/interface wireguard remove [find comment=\"Telemt Cascade\"]${RESET}\n"
+  printf "  ${CYAN}/ip firewall nat remove [find comment=\"%s\"]${RESET}\n" "$CASCADE_COMMENT"
+  printf "  ${CYAN}/ip address remove [find comment=\"%s\"]${RESET}\n" "$CASCADE_COMMENT"
+  printf "  ${CYAN}/interface wireguard peers remove [find comment=\"%s\"]${RESET}\n" "$CASCADE_COMMENT"
+  printf "  ${CYAN}/interface wireguard remove [find comment=\"%s\"]${RESET}\n" "$CASCADE_COMMENT"
   printf "  \033[2m──────────────────────────────────────────────────────────────\033[0m\n\n"
   printf "  \033[2mThese commands remove all Telemt Cascade rules by comment tag.\033[0m\n\n"
 
@@ -1498,12 +1504,12 @@ function show_menu() {
       3)
         printf "  Enter new port \033[2m[current: %s]\033[0m: " "$PORT"
         read input
-        if [[ "$input" =~ ^[0-9]+$ ]]; then
+        if [[ "$input" =~ ^[0-9]+$ ]] && [ "$input" -ge 1 ] && [ "$input" -le 65535 ]; then
           PORT="$input"
           save_config_env
           start_proxy
         elif [ -n "$input" ]; then
-          _fail "Port must be a number (you entered: $input)"
+          _fail "Port must be a number between 1 and 65535 (you entered: $input)"
           sleep 2
         fi
         ;;
