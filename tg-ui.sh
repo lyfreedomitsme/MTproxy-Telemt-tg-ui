@@ -350,10 +350,14 @@ function start_proxy() {
   if sudo $DOCKER_COMPOSE up -d >/dev/null 2>&1; then
     local i=0
     local status=""
-    while [ $i -lt 100 ]; do
+    while [ $i -lt 300 ]; do
       status=$(sudo docker inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null)
       if [ "$status" == "running" ]; then
         _spin_ok "Container running"
+        break
+      fi
+      # If container exited with error — no point waiting further
+      if [ "$status" == "exited" ] || [ "$status" == "dead" ]; then
         break
       fi
       _spin "${_frames[$((i % 10))]}" "Waiting for container..."
@@ -361,7 +365,13 @@ function start_proxy() {
     done
 
     if [ "$status" != "running" ]; then
-      _fail "Error starting container"
+      local exit_code=$(sudo docker inspect -f '{{.State.ExitCode}}' "$CONTAINER_NAME" 2>/dev/null)
+      local error_msg=$(sudo docker inspect -f '{{.State.Error}}' "$CONTAINER_NAME" 2>/dev/null)
+      _fail "Error starting container (status: ${status:-unknown}, exit: ${exit_code:-?})"
+      [ -n "$error_msg" ] && printf "     Error: %s\n" "$error_msg"
+      sudo docker logs "$CONTAINER_NAME" 2>&1 | tail -8 | while IFS= read -r line; do
+        printf "     \033[2m%s\033[0m\n" "$line"
+      done
       return 1
     fi
 
@@ -1453,7 +1463,7 @@ if [ "$1" == "--auto" ]; then
 elif [ "$1" == "start" ]; then
   migrate_to_multi_user
   start_proxy
-  exit 0
+  exit $?
 elif [ "$1" == "stop" ]; then
   cd "$PROJECT_DIR"
   sudo $DOCKER_COMPOSE down
