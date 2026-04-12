@@ -177,7 +177,31 @@ tls = true
 
 [server]
 port = ${PORT:-8443}
+idle_timeout = 300
+read_timeout = 60
+write_timeout = 60
+
 EOF
+
+  # Add listener configuration based on IP type
+  if _is_ipv6 "$SERVER_IP"; then
+    # IPv6 listener
+    cat <<EOF
+[[server.listeners]]
+ip = "[::]"
+port = ${PORT:-8443}
+announce_ip = "$SERVER_IP"
+
+EOF
+  else
+    # IPv4 listener
+    cat <<EOF
+[[server.listeners]]
+ip = "0.0.0.0"
+port = ${PORT:-8443}
+
+EOF
+  fi
 
   if [ "$PROXY_PROTOCOL" == "true" ]; then
     echo "proxy_protocol = true"
@@ -295,25 +319,39 @@ function start_proxy() {
 
   local ram_config="/dev/shm/telemt-tgui-config.toml"
   printf "  \033[2mGenerating config...\033[0m\n"
-  
+
   # Remove if Docker incorrectly created this path as a directory
   if [ -d "$ram_config" ]; then
     sudo rm -rf "$ram_config"
   fi
-  
+
   get_config_toml_content | sudo tee "$ram_config" > /dev/null
   sudo chmod 644 "$ram_config"
   _ok "Config written"
 
   save_config_env
   sync_mikrotik_commands  # Auto-refresh Mikrotik commands if port/IP changed
+
+  # Apply TCP keepalive to auto-close dead connections (fixes "infinite loading" on reconnect)
+  if [ "$(sysctl -n net.ipv4.tcp_keepalive_time 2>/dev/null)" != "60" ]; then
+    sudo sysctl -w net.ipv4.tcp_keepalive_time=60 >/dev/null 2>&1
+    sudo sysctl -w net.ipv4.tcp_keepalive_intvl=10 >/dev/null 2>&1
+    sudo sysctl -w net.ipv4.tcp_keepalive_probes=3 >/dev/null 2>&1
+    grep -q "net.ipv4.tcp_keepalive_time" /etc/sysctl.conf 2>/dev/null || {
+      echo "net.ipv4.tcp_keepalive_time=60" | sudo tee -a /etc/sysctl.conf >/dev/null
+      echo "net.ipv4.tcp_keepalive_intvl=10" | sudo tee -a /etc/sysctl.conf >/dev/null
+      echo "net.ipv4.tcp_keepalive_probes=3" | sudo tee -a /etc/sysctl.conf >/dev/null
+    }
+  fi
+
   cd "$PROJECT_DIR"
   sudo $DOCKER_COMPOSE down >/dev/null 2>&1
 
   if sudo $DOCKER_COMPOSE up -d >/dev/null 2>&1; then
     local i=0
-    while [ $i -lt 40 ]; do
-      local status=$(sudo docker inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null)
+    local status=""
+    while [ $i -lt 100 ]; do
+      status=$(sudo docker inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null)
       if [ "$status" == "running" ]; then
         _spin_ok "Container running"
         break
@@ -321,6 +359,11 @@ function start_proxy() {
       _spin "${_frames[$((i % 10))]}" "Waiting for container..."
       ((i++)); sleep 0.1
     done
+
+    if [ "$status" != "running" ]; then
+      _fail "Error starting container"
+      return 1
+    fi
 
     if [ -z "$SERVER_IP" ]; then
       if command -v curl >/dev/null 2>&1; then
@@ -345,32 +388,34 @@ function start_proxy() {
 
 function _fetch_ip() {
   if [ -z "$SERVER_IP" ] || [ "$SERVER_IP" == "YOUR_UBUNTU_IP" ]; then
+    # Priority: IPv4 first, then fallback to IPv6
     if command -v curl >/dev/null 2>&1; then
       SERVER_IP=$(curl -s --connect-timeout 2 ifconfig.me 2>/dev/null || \
                   curl -s --connect-timeout 2 ipinfo.io/ip 2>/dev/null || \
                   curl -s --connect-timeout 2 icanhazip.com 2>/dev/null || \
                   curl -s --connect-timeout 2 api.ipify.org 2>/dev/null)
     fi
-    # Fallback to local primary interface IP if external detection fails
+
+    # Fallback to local primary IPv4 interface
     if [ -z "$SERVER_IP" ]; then
       SERVER_IP=$(ip route get 1.1.1.1 2>/dev/null | grep -oP 'src \K\S+' || \
                   hostname -I | awk '{print $1}')
     fi
+
+    # Final fallback: IPv6 if no IPv4 found
+    if [ -z "$SERVER_IP" ]; then
+      SERVER_IP=$(ip -6 addr show | grep "scope global" | head -1 | awk '{print $2}' | cut -d/ -f1)
+    fi
   else
-    # Verify if stored IP is still present on the machine (optional but safer)
-    if [[ ! "$SERVER_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-       # It might be a domain, skip validation
-       return
+    # Validate: IPv4 or IPv6
+    if [[ "$SERVER_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+       return  # Valid IPv4
     fi
-    # If the stored IP is NOT in the local IPs and we are not in cascade mode
-    if ! _is_cascade_active && ! hostname -I | grep -q "$SERVER_IP"; then
-       # Silent check for IP change
-       local new_ip=$(curl -s --connect-timeout 2 ifconfig.me 2>/dev/null)
-       if [ -n "$new_ip" ] && [ "$new_ip" != "$SERVER_IP" ]; then
-         SERVER_IP="$new_ip"
-         save_config_env
-       fi
+    if [[ "$SERVER_IP" =~ : ]]; then
+       return  # Valid IPv6
     fi
+    # It might be a domain, skip validation
+    return
   fi
 }
 
@@ -380,8 +425,34 @@ function _is_cascade_active() {
   sudo wg show wg-telemt endpoints 2>/dev/null | grep -qv "(none)"
 }
 
+function _is_ipv6() {
+  local ip="$1"
+  [[ "$ip" =~ : ]]
+}
+
 function _get_cascade_ip() {
-  local ext_ip=$(sudo wg show wg-telemt endpoints 2>/dev/null | awk '{print $2}' | cut -d: -f1 | grep -v "(none)" | head -n 1)
+  local endpoint=$(sudo wg show wg-telemt endpoints 2>/dev/null | awk '{print $2}' | grep -v "(none)" | head -n 1)
+
+  if [ -z "$endpoint" ]; then
+    echo "$SERVER_IP"
+    return
+  fi
+
+  # Parse endpoint - remove port for both IPv4 and IPv6
+  local ext_ip
+  if [[ "$endpoint" =~ ^\[.*\]:[0-9]+$ ]]; then
+    # IPv6 with brackets: [addr]:port
+    ext_ip="${endpoint%:*}"  # Remove port
+    ext_ip="${ext_ip#\[}"    # Remove leading [
+    ext_ip="${ext_ip%\]}"    # Remove trailing ]
+  elif [[ "$endpoint" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+$ ]]; then
+    # IPv4: addr:port
+    ext_ip="${endpoint%:*}"
+  else
+    # Assume it's already just an address without port
+    ext_ip="$endpoint"
+  fi
+
   echo "${ext_ip:-$SERVER_IP}"
 }
 
@@ -392,8 +463,17 @@ function show_link() {
   local display_ip="$SERVER_IP"
   local display_port="$PORT"
 
+  # Format IPv6 with brackets for proper URL formatting
+  if [[ "$display_ip" =~ : ]]; then
+    display_ip="[$display_ip]"
+  fi
+
   if _is_cascade_active; then
     display_ip=$(_get_cascade_ip)
+    # Format cascade IPv6 with brackets
+    if [[ "$display_ip" =~ : ]]; then
+      display_ip="[$display_ip]"
+    fi
     display_port="$MIKROTIK_EXT_PORT"
     _ok "Cascade active: Generating links for Mikrotik ($display_ip:$display_port)"
   fi
@@ -448,8 +528,17 @@ function show_qr() {
   local display_ip="$SERVER_IP"
   local display_port="$PORT"
 
+  # Format IPv6 with brackets
+  if [[ "$display_ip" =~ : ]]; then
+    display_ip="[$display_ip]"
+  fi
+
   if _is_cascade_active; then
     display_ip=$(_get_cascade_ip)
+    # Format cascade IPv6 with brackets
+    if [[ "$display_ip" =~ : ]]; then
+      display_ip="[$display_ip]"
+    fi
     display_port="$MIKROTIK_EXT_PORT"
   fi
 
@@ -749,7 +838,7 @@ function select_server_ip() {
       marker=" \033[32m(current)\033[0m"
       current_found=true
     fi
-    printf "  \033[2m%2d)\033[0m  %s%s\n" "$((i+1))" "$ip" "$marker"
+    printf "  \033[2m%2d)\033[0m  %s%b\n" "$((i+1))" "$ip" "$marker"
   done
 
   printf "  \033[2m 0)\033[0m  Automatic detection\n"
@@ -847,18 +936,34 @@ function setup_mikrotik_cascade() {
   
   if ! command -v wg &> /dev/null; then
     printf "  \033[33m!\033[0m  Wireguard tools not installed. Installing...\n"
-    apt-get update && apt-get install -y wireguard-tools iptables iproute2
+    local pkgs="wireguard-tools iptables iproute2"
+    if _is_ipv6 "$DISPLAY_IP"; then
+      pkgs="$pkgs ip6tables"
+    fi
+    apt-get update && apt-get install -y $pkgs
     if ! command -v wg &> /dev/null; then
        printf "  \033[31mx\033[0m  Failed to install wireguard-tools. Please install manually.\n"
        read -p "  Press Enter to return..."
        return
     fi
+  elif _is_ipv6 "$DISPLAY_IP" && ! command -v ip6tables &> /dev/null; then
+    printf "  \033[33m!\033[0m  Installing ip6tables for IPv6 support...\n"
+    apt-get update && apt-get install -y ip6tables >/dev/null 2>&1
   fi
 
   if [ "$(sysctl -n net.ipv4.ip_forward)" != "1" ]; then
     printf "  \033[2mEnabling IP forwarding...\033[0m\n"
     sysctl -w net.ipv4.ip_forward=1 > /dev/null
     grep -q "^net.ipv4.ip_forward=1" /etc/sysctl.conf || echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
+  fi
+
+  # Enable IPv6 forwarding if IPv6 is used
+  if _is_ipv6 "$DISPLAY_IP"; then
+    if [ "$(sysctl -n net.ipv6.conf.all.forwarding)" != "1" ]; then
+      printf "  \033[2mEnabling IPv6 forwarding...\033[0m\n"
+      sysctl -w net.ipv6.conf.all.forwarding=1 > /dev/null
+      grep -q "^net.ipv6.conf.all.forwarding=1" /etc/sysctl.conf || echo "net.ipv6.conf.all.forwarding=1" >> /etc/sysctl.conf
+    fi
   fi
   
   local WG_DIR="/etc/wireguard"
@@ -920,10 +1025,43 @@ function setup_mikrotik_cascade() {
   local SERVER_PUB=$(echo "$SERVER_PRIV" | wg pubkey)
   local MIKROTIK_PRIV=$(wg genkey)
   local MIKROTIK_PUB=$(echo "$MIKROTIK_PRIV" | wg pubkey)
-  
-  local WG_IP_SERVER="10.99.99.1"
-  local WG_IP_MIKROTIK="10.99.99.2"
+
   local WG_PORT="51830"
+
+  # Determine IP type and set appropriate WireGuard addresses
+  local WG_IP_SERVER
+  local WG_IP_MIKROTIK
+  local WG_ALLOWED_IPS
+  local USE_IPV6=false
+
+  if _is_ipv6 "$DISPLAY_IP"; then
+    printf "  \033[32m●\033[0m  IPv6 detected: $DISPLAY_IP\n"
+    printf "\n  \033[31m!\033[0m  IPv6 cascade requires Mikrotik with IPv6 support!\n"
+    printf "  \033[33m!\033[0m  Does your Mikrotik support IPv6? (y/n): "
+    read mk_ipv6_support
+
+    if [[ "$mk_ipv6_support" =~ ^[Yy]$ ]]; then
+      USE_IPV6=true
+      WG_IP_SERVER="fd00::1"
+      WG_IP_MIKROTIK="fd00::2"
+      WG_ALLOWED_IPS="::/0"
+      printf "  \033[32m✓\033[0m  IPv6 cascade mode enabled\n"
+    else
+      printf "  \033[31mx\033[0m  ERROR: Cannot create cascade without IPv6 on Mikrotik!\n"
+      printf "     Your Ubuntu has IPv6 ($DISPLAY_IP), but Mikrotik doesn't.\n"
+      printf "     WireGuard endpoint must match the public IP type.\n"
+      printf "\n     Solutions:\n"
+      printf "     1. Enable IPv6 on your Mikrotik\n"
+      printf "     2. Or use a different Ubuntu server with IPv4\n\n"
+      read -p "  Press Enter to return..."
+      return
+    fi
+  else
+    printf "  \033[32m●\033[0m  IPv4 detected\n"
+    WG_IP_SERVER="10.99.99.1"
+    WG_IP_MIKROTIK="10.99.99.2"
+    WG_ALLOWED_IPS="0.0.0.0/0"
+  fi
 
   printf "  \033[2mConfiguring external access...\033[0m\n"
   printf "  Which port to use on Mikrotik for users? \033[2m[default: 443]\033[0m: "
@@ -936,26 +1074,47 @@ function setup_mikrotik_cascade() {
   save_config_env
 
   mkdir -p "$WG_DIR"
-  cat > "$CONF_FILE" <<EOF
+
+  # Generate WireGuard config based on USE_IPV6 choice
+  if [ "$USE_IPV6" = true ]; then
+    # IPv6 version - simplified for better compatibility
+    cat > "$CONF_FILE" <<'EOF'
 [Interface]
+EOF
+    cat >> "$CONF_FILE" <<EOF
+PrivateKey = $SERVER_PRIV
+Address = $WG_IP_SERVER/64
+ListenPort = $WG_PORT
+Table = off
+PostUp = ip6tables -t mangle -A PREROUTING -i wg-telemt ! -s $WG_IP_MIKROTIK -j CONNMARK --set-mark 200
+PostUp = ip6tables -t mangle -A PREROUTING -m connmark --mark 200 -j MARK --set-mark 200
+PostUp = ip rule add fwmark 200 table 200 priority 90 2>/dev/null || true
+PostUp = ip6tables -t nat -I POSTROUTING 1 -o wg-telemt -m connmark --mark 200 -j SNAT --to-source $WG_IP_SERVER
+PostUp = (sleep 0.5; docker restart ${CONTAINER_NAME}) > /dev/null 2>&1 &
+PostDown = ip6tables -t mangle -D PREROUTING -i wg-telemt ! -s $WG_IP_MIKROTIK -j CONNMARK --set-mark 200 || true
+PostDown = ip6tables -t mangle -D PREROUTING -m connmark --mark 200 -j MARK --set-mark 200 || true
+PostDown = ip rule del fwmark 200 table 200 priority 90 2>/dev/null || true
+PostDown = ip6tables -t nat -D POSTROUTING -o wg-telemt -m connmark --mark 200 -j SNAT --to-source $WG_IP_SERVER || true
+
+[Peer]
+PublicKey = $MIKROTIK_PUB
+AllowedIPs = $WG_ALLOWED_IPS
+EOF
+  else
+    # IPv4 version with iptables
+    cat > "$CONF_FILE" <<'EOF'
+[Interface]
+EOF
+    cat >> "$CONF_FILE" <<EOF
 PrivateKey = $SERVER_PRIV
 Address = $WG_IP_SERVER/24
 ListenPort = $WG_PORT
 Table = off
-PostUp = ip rule del from $WG_IP_SERVER table 200 2>/dev/null || true
-PostUp = ip rule add from $WG_IP_SERVER table 200 priority 100
-PostUp = ip route del default dev wg-telemt table 200 2>/dev/null || true
-PostUp = ip route add default dev wg-telemt table 200
-PostUp = iptables -t mangle -D PREROUTING -i wg-telemt ! -s $WG_IP_MIKROTIK -j CONNMARK --set-mark 200 2>/dev/null || true
 PostUp = iptables -t mangle -A PREROUTING -i wg-telemt ! -s $WG_IP_MIKROTIK -j CONNMARK --set-mark 200
-PostUp = iptables -t mangle -D PREROUTING -m connmark --mark 200 -j MARK --set-mark 200 2>/dev/null || true
 PostUp = iptables -t mangle -A PREROUTING -m connmark --mark 200 -j MARK --set-mark 200
-PostUp = ip rule del fwmark 200 table 200 priority 90 2>/dev/null || true
-PostUp = ip rule add fwmark 200 table 200 priority 90
+PostUp = ip rule add fwmark 200 table 200 priority 90 2>/dev/null || true
 PostUp = iptables -t nat -I POSTROUTING 1 -o wg-telemt -m connmark --mark 200 -j SNAT --to-source $WG_IP_SERVER
-PostUp = docker restart ${CONTAINER_NAME} 2>/dev/null || true
-PostDown = ip rule del from $WG_IP_SERVER table 200 2>/dev/null || true
-PostDown = ip route del default dev wg-telemt table 200 2>/dev/null || true
+PostUp = (sleep 0.5; docker restart ${CONTAINER_NAME}) > /dev/null 2>&1 &
 PostDown = iptables -t mangle -D PREROUTING -i wg-telemt ! -s $WG_IP_MIKROTIK -j CONNMARK --set-mark 200 || true
 PostDown = iptables -t mangle -D PREROUTING -m connmark --mark 200 -j MARK --set-mark 200 || true
 PostDown = ip rule del fwmark 200 table 200 priority 90 2>/dev/null || true
@@ -963,17 +1122,31 @@ PostDown = iptables -t nat -D POSTROUTING -o wg-telemt -m connmark --mark 200 -j
 
 [Peer]
 PublicKey = $MIKROTIK_PUB
-AllowedIPs = 0.0.0.0/0
+AllowedIPs = $WG_ALLOWED_IPS
 EOF
+  fi
   chmod 600 "$CONF_FILE"
 
-  cat > "$MIKROTIK_TXT" <<EOF
+  # Generate Mikrotik config based on USE_IPV6 choice
+  if [ "$USE_IPV6" = true ]; then
+    # IPv6 version
+    cat > "$MIKROTIK_TXT" <<EOF
+/interface wireguard add comment="Telemt Cascade IPv6" listen-port=13231 name=wg-telemt private-key="$MIKROTIK_PRIV"
+/interface wireguard peers add allowed-address=::/0 comment="Telemt Cascade IPv6" endpoint-address=$DISPLAY_IP endpoint-port=$WG_PORT interface=wg-telemt public-key="$SERVER_PUB"
+/ip address add address=$WG_IP_MIKROTIK/64 comment="Telemt Cascade IPv6" interface=wg-telemt
+/ip firewall nat add action=accept chain=srcnat comment="Telemt Cascade IPv6" protocol=tcp dst-port=$PORT out-interface=wg-telemt place-before=0
+/ip firewall nat add action=dst-nat chain=dstnat comment="Telemt Cascade IPv6" protocol=tcp dst-port=$MIKROTIK_EXT_PORT in-interface=ether1 to-addresses=$WG_IP_SERVER to-ports=$PORT
+EOF
+  else
+    # IPv4 version
+    cat > "$MIKROTIK_TXT" <<EOF
 /interface wireguard add comment="Telemt Cascade" listen-port=13231 name=wg-telemt private-key="$MIKROTIK_PRIV"
 /interface wireguard peers add allowed-address=0.0.0.0/0 comment="Telemt Cascade" endpoint-address=$DISPLAY_IP endpoint-port=$WG_PORT interface=wg-telemt public-key="$SERVER_PUB"
 /ip address add address=$WG_IP_MIKROTIK/24 comment="Telemt Cascade" interface=wg-telemt
 /ip firewall nat add action=accept chain=srcnat comment="Telemt Cascade" protocol=tcp dst-port=$PORT out-interface=wg-telemt place-before=0
 /ip firewall nat add action=dst-nat chain=dstnat comment="Telemt Cascade" protocol=tcp dst-port=$MIKROTIK_EXT_PORT in-interface=ether1 to-addresses=$WG_IP_SERVER to-ports=$PORT
 EOF
+  fi
   
   systemctl enable --now wg-quick@wg-telemt &> /dev/null || true
   sleep 1
@@ -983,6 +1156,25 @@ EOF
     printf "     Check: \033[2msystemctl status wg-quick@wg-telemt\033[0m\n"
     read -p "  Press Enter to return..."
     return
+  fi
+
+  # Wait for container to restart and initialize with tunnel
+  printf "  \033[2mWaiting for container to initialize with tunnel...\033[0m\n"
+  sleep 3
+
+  local container_ready=false
+  for ((i=0; i<20; i++)); do
+    if sudo docker inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null | grep -q "running"; then
+      container_ready=true
+      break
+    fi
+    sleep 0.5
+  done
+
+  if [ "$container_ready" = true ]; then
+    printf "  \033[32m✔\033[0m  Container restarted with tunnel\n"
+  else
+    printf "  \033[33m!\033[0m  Warning: Container may not have restarted. Check: \033[2msudo docker logs $CONTAINER_NAME\033[0m\n"
   fi
 
   # Open WireGuard UDP port in firewall
@@ -1068,8 +1260,6 @@ function sync_mikrotik_commands() {
   local WG_DIR="/etc/wireguard"
   local CONF_FILE="$WG_DIR/wg-telemt.conf"
   local MIKROTIK_TXT="$WG_DIR/wg-telemt-mikrotik.txt"
-  local WG_IP_SERVER="10.99.99.1"
-  local WG_IP_MIKROTIK="10.99.99.2"
   local WG_PORT="51830"
 
   [ ! -f "$CONF_FILE" ] && return
@@ -1080,25 +1270,64 @@ function sync_mikrotik_commands() {
   local SERVER_PUB=$(grep "PrivateKey" "$CONF_FILE" | awk '{print $3}' | wg pubkey)
   local MIKROTIK_PRIV=$(grep -oP '/interface wireguard add .* private-key="\K[^"]+' "$MIKROTIK_TXT" 2>/dev/null || echo "PLACEHOLDER")
 
-  # Regenerate TXT file with current IP and current proxy port
-  sudo tee "$MIKROTIK_TXT" >/dev/null <<EOF
+  # Determine current cascade type from existing config
+  local USE_IPV6=false
+  if grep -q "IPv6" "$MIKROTIK_TXT" 2>/dev/null; then
+    USE_IPV6=true
+  fi
+
+  # Determine IP type and set appropriate WireGuard addresses
+  local WG_IP_SERVER
+  local WG_IP_MIKROTIK
+  local WG_ALLOWED_IPS
+  local WG_MASK
+
+  if [ "$USE_IPV6" = true ]; then
+    WG_IP_SERVER="fd00::1"
+    WG_IP_MIKROTIK="fd00::2"
+    WG_ALLOWED_IPS="::/0"
+    WG_MASK="64"
+  else
+    WG_IP_SERVER="10.99.99.1"
+    WG_IP_MIKROTIK="10.99.99.2"
+    WG_ALLOWED_IPS="0.0.0.0/0"
+    WG_MASK="24"
+  fi
+
+  # Regenerate TXT file with current IP and current proxy port based on cascade type
+  if [ "$USE_IPV6" = true ]; then
+    sudo tee "$MIKROTIK_TXT" >/dev/null <<EOF
+/interface wireguard add comment="Telemt Cascade IPv6" listen-port=13231 name=wg-telemt private-key="$MIKROTIK_PRIV"
+/interface wireguard peers add allowed-address=::/0 comment="Telemt Cascade IPv6" endpoint-address=$DISPLAY_IP endpoint-port=$WG_PORT interface=wg-telemt public-key="$SERVER_PUB"
+/ip address add address=$WG_IP_MIKROTIK/$WG_MASK comment="Telemt Cascade IPv6" interface=wg-telemt
+/ip firewall nat add action=accept chain=srcnat comment="Telemt Cascade IPv6" protocol=tcp dst-port=$PORT out-interface=wg-telemt place-before=0
+/ip firewall nat add action=dst-nat chain=dstnat comment="Telemt Cascade IPv6" protocol=tcp dst-port=$MIKROTIK_EXT_PORT in-interface=ether1 to-addresses=$WG_IP_SERVER to-ports=$PORT
+EOF
+  else
+    sudo tee "$MIKROTIK_TXT" >/dev/null <<EOF
 /interface wireguard add comment="Telemt Cascade" listen-port=13231 name=wg-telemt private-key="$MIKROTIK_PRIV"
 /interface wireguard peers add allowed-address=0.0.0.0/0 comment="Telemt Cascade" endpoint-address=$DISPLAY_IP endpoint-port=$WG_PORT interface=wg-telemt public-key="$SERVER_PUB"
-/ip address add address=$WG_IP_MIKROTIK/24 comment="Telemt Cascade" interface=wg-telemt
+/ip address add address=$WG_IP_MIKROTIK/$WG_MASK comment="Telemt Cascade" interface=wg-telemt
 /ip firewall nat add action=accept chain=srcnat comment="Telemt Cascade" protocol=tcp dst-port=$PORT out-interface=wg-telemt place-before=0
 /ip firewall nat add action=dst-nat chain=dstnat comment="Telemt Cascade" protocol=tcp dst-port=$MIKROTIK_EXT_PORT in-interface=ether1 to-addresses=$WG_IP_SERVER to-ports=$PORT
 EOF
+  fi
 
   # Ensure transparent IP forwarding rules are active (idempotent - for existing setups)
   if ip link show wg-telemt &>/dev/null; then
-    iptables -t mangle -C PREROUTING -i wg-telemt ! -s "$WG_IP_MIKROTIK" -j CONNMARK --set-mark 200 2>/dev/null || \
-      iptables -t mangle -A PREROUTING -i wg-telemt ! -s "$WG_IP_MIKROTIK" -j CONNMARK --set-mark 200
-    iptables -t mangle -C PREROUTING -m connmark --mark 200 -j MARK --set-mark 200 2>/dev/null || \
-      iptables -t mangle -A PREROUTING -m connmark --mark 200 -j MARK --set-mark 200
-    ip rule show | grep -q "fwmark 0xc8 lookup 200" || ip rule show | grep -q "fwmark 0xc8 lookup wg_table" || \
-      ip rule add fwmark 200 table 200 priority 90 2>/dev/null || true
-    iptables -t nat -C POSTROUTING -o wg-telemt -m connmark --mark 200 -j SNAT --to-source "$WG_IP_SERVER" 2>/dev/null || \
-      iptables -t nat -I POSTROUTING 1 -o wg-telemt -m connmark --mark 200 -j SNAT --to-source "$WG_IP_SERVER"
+    local ipt_cmd="iptables"
+    if [ "$USE_IPV6" = true ]; then
+      ipt_cmd="ip6tables"
+    fi
+
+    sudo $ipt_cmd -t mangle -C PREROUTING -i wg-telemt ! -s "$WG_IP_MIKROTIK" -j CONNMARK --set-mark 200 2>/dev/null || \
+      sudo $ipt_cmd -t mangle -A PREROUTING -i wg-telemt ! -s "$WG_IP_MIKROTIK" -j CONNMARK --set-mark 200
+    sudo $ipt_cmd -t mangle -C PREROUTING -m connmark --mark 200 -j MARK --set-mark 200 2>/dev/null || \
+      sudo $ipt_cmd -t mangle -A PREROUTING -m connmark --mark 200 -j MARK --set-mark 200
+    sudo ip rule show | grep -q "fwmark 0xc8 lookup 200" || sudo ip rule show | grep -q "fwmark 0xc8 lookup wg_table" || \
+      sudo ip rule add fwmark 200 table 200 priority 90 2>/dev/null || true
+    sudo $ipt_cmd -t nat -C POSTROUTING -o wg-telemt -m connmark --mark 200 -j SNAT --to-source "$WG_IP_SERVER" 2>/dev/null || \
+      sudo $ipt_cmd -t nat -I POSTROUTING 1 -o wg-telemt -m connmark --mark 200 -j SNAT --to-source "$WG_IP_SERVER"
   fi
 }
 
