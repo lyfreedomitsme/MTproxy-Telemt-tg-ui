@@ -791,7 +791,7 @@ function update_panel() {
   else
     # Non-git update (fallback to curl)
     if command -v curl >/dev/null 2>&1; then
-       local raw_url="https://raw.githubusercontent.com/lyfreedomitsme/MTproxy-Telmet-tg-ui/master/tg-ui.sh"
+       local raw_url="https://raw.githubusercontent.com/lyfreedomitsme/MTproxy-Telemt-tg-ui/master/tg-ui.sh"
        if curl -sL "$raw_url" -o /tmp/tg-ui-update.sh; then
           chmod +x /tmp/tg-ui-update.sh
           # Replace binary in /usr/local/bin

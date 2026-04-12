@@ -10,7 +10,7 @@ if ! command -v sudo >/dev/null; then
 fi
 
 REPO_URL="https://github.com/lyfreedomitsme/MTproxy-Telemt-tg-ui.git"
-INSTALL_DIR="$HOME/MTproxy-Telamt-tg-ui"
+INSTALL_DIR="$HOME/MTproxy-Telmet-tg-ui"
 
 # ── Colors ────────────────────────────────────────────────────
 RESET='\033[0m'
