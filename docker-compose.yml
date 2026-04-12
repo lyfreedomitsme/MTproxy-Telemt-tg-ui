@@ -19,7 +19,7 @@ services:
         soft: 65536
         hard: 65536
     tmpfs:
-      - /run/telemt:rw,size=128m,mode=1777
-      - /etc/telemt:rw,size=16m,mode=1777
+      - /run/telemt
+      - /etc/telemt
     volumes:
       - /dev/shm/telemt-tgui-config.toml:/run/telemt/config.toml:ro
