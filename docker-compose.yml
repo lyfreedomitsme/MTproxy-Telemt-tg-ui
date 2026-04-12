@@ -1,7 +1,7 @@
 services:
   telemt:
     image: ghcr.io/telemt/telemt:latest
-    container_name: ${CONTAINER_NAME:-telemt-proxy}
+    container_name: telemt-proxy
     restart: unless-stopped
     network_mode: "host"
     working_dir: /run/telemt
