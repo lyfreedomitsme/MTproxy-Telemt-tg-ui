@@ -54,14 +54,78 @@ if ! command -v sudo >/dev/null; then
 fi
 
 # Detect Docker Compose command (legacy binary vs modern plugin)
+# Also detect if it's v1 (docker-compose) or v2 (docker compose plugin)
+DOCKER_COMPOSE_V1=false
 if docker compose version >/dev/null 2>&1; then
   DOCKER_COMPOSE="docker compose"
 elif docker-compose version >/dev/null 2>&1; then
   DOCKER_COMPOSE="docker-compose"
+  DOCKER_COMPOSE_V1=true
 else
   echo -e "${RED}❌ Docker Compose is not installed!${NC}"
   exit 1
 fi
+
+function _write_compose_file() {
+  if [ "$DOCKER_COMPOSE_V1" = true ]; then
+    # v1: version 2.2, no tmpfs mount options
+    cat > "$PROJECT_DIR/docker-compose.yml" <<'EOF'
+version: "2.2"
+services:
+  telemt:
+    image: ghcr.io/telemt/telemt:latest
+    container_name: telemt-proxy
+    restart: unless-stopped
+    network_mode: "host"
+    working_dir: /run/telemt
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    user: "65534:65534"
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    tmpfs:
+      - /run/telemt
+      - /etc/telemt
+    volumes:
+      - /dev/shm/telemt-tgui-config.toml:/run/telemt/config.toml:ro
+EOF
+  else
+    # v2: no version field needed, full tmpfs options supported
+    cat > "$PROJECT_DIR/docker-compose.yml" <<'EOF'
+services:
+  telemt:
+    image: ghcr.io/telemt/telemt:latest
+    container_name: telemt-proxy
+    restart: unless-stopped
+    network_mode: "host"
+    working_dir: /run/telemt
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    user: "65534:65534"
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    tmpfs:
+      - /run/telemt:rw,size=128m,mode=1777
+      - /etc/telemt:rw,size=16m,mode=1777
+    volumes:
+      - /dev/shm/telemt-tgui-config.toml:/run/telemt/config.toml:ro
+EOF
+  fi
+}
 
 # Default values for all settings
 FAKE_DOMAIN="ya.ru"
@@ -345,6 +409,7 @@ function start_proxy() {
   fi
 
   cd "$PROJECT_DIR"
+  _write_compose_file
   sudo $DOCKER_COMPOSE down >/dev/null 2>&1
 
   if sudo $DOCKER_COMPOSE up -d >/dev/null 2>&1; then
