@@ -233,7 +233,7 @@ function get_config_toml_content() {
 ad_tag = "${AD_TAG:-00000000000000000000000000000000}"
 use_middle_proxy = true
 log_level = "${LOG_LEVEL:-normal}"
-rst_on_close = "Errors"
+rst_on_close = "Always"
 
 [general.modes]
 classic = false
@@ -246,8 +246,8 @@ port = ${PORT:-8443}
 [timeouts]
 client_keepalive = 15
 client_first_byte_idle_secs = 120
-relay_client_idle_soft_secs = 120
-relay_client_idle_hard_secs = 300
+relay_client_idle_soft_secs = 60
+relay_client_idle_hard_secs = 90
 
 EOF
 
@@ -1064,6 +1064,14 @@ function setup_mikrotik_cascade() {
       printf "  \033[32m✔\033[0m  WireGuard config patched\n"
     fi
 
+    # Patch existing config if missing PersistentKeepalive (keeps tunnel alive, fixes idle reconnect)
+    if ! grep -q "PersistentKeepalive" "$CONF_FILE" 2>/dev/null; then
+      printf "  \033[2mPatching config to add PersistentKeepalive (fixes idle reconnect bug)...\033[0m\n"
+      sed -i '/^\[Peer\]/a PersistentKeepalive = 25' "$CONF_FILE"
+      config_updated=true
+      printf "  \033[32m✔\033[0m  PersistentKeepalive = 25 added\n"
+    fi
+
     # Ensure systemd service is enabled for auto-start on reboot
     if ! systemctl is-enabled wg-quick@wg-telemt &>/dev/null; then
       printf "  \033[2mEnabling WireGuard auto-start on system reboot...\033[0m\n"
@@ -1178,6 +1186,7 @@ PostDown = ip6tables -t nat -D POSTROUTING -o wg-telemt -m connmark --mark 200 -
 [Peer]
 PublicKey = $MIKROTIK_PUB
 AllowedIPs = $WG_ALLOWED_IPS
+PersistentKeepalive = 25
 EOF
   else
     # IPv4 version with iptables
@@ -1202,6 +1211,7 @@ PostDown = iptables -t nat -D POSTROUTING -o wg-telemt -m connmark --mark 200 -j
 [Peer]
 PublicKey = $MIKROTIK_PUB
 AllowedIPs = $WG_ALLOWED_IPS
+PersistentKeepalive = 25
 EOF
   fi
   chmod 600 "$CONF_FILE"
