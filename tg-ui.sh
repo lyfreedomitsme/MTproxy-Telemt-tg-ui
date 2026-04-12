@@ -158,7 +158,7 @@ USER_MAX_IPS="${USER_MAX_IPS:-0}"
 SECRET="${SECRET}"
 SERVER_IP="${SERVER_IP}"
 MASK_ENABLED="${MASK_ENABLED:-true}"
-LOG_LEVEL="${LOG_LEVEL:-warn}"
+LOG_LEVEL="${LOG_LEVEL:-normal}"
 MASK_PORT="${MASK_PORT:-443}"
 PROXY_PROTOCOL="${PROXY_PROTOCOL:-false}"
 PROXY_PROTOCOL_CIDRS="${PROXY_PROTOCOL_CIDRS:-}"
@@ -174,7 +174,7 @@ INTERNAL_PORT="${INTERNAL_PORT:-443}"
 USER_MAX_IPS="${USER_MAX_IPS:-0}"
 FAKE_DOMAIN="${FAKE_DOMAIN}"
 MASK_ENABLED="${MASK_ENABLED:-true}"
-LOG_LEVEL="${LOG_LEVEL:-warn}"
+LOG_LEVEL="${LOG_LEVEL:-normal}"
 MASK_PORT="${MASK_PORT:-443}"
 PROXY_PROTOCOL="${PROXY_PROTOCOL:-false}"
 PROXY_PROTOCOL_CIDRS="${PROXY_PROTOCOL_CIDRS:-}"
@@ -1451,7 +1451,7 @@ function show_menu() {
     chmod 644 "$PROJECT_DIR/.env" "$CONFIG_FILE"
   fi
 
-  if ! sudo docker ps | grep -q "${CONTAINER_NAME}"; then
+  if ! sudo docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
     start_proxy
     sleep 1
   fi
@@ -1460,7 +1460,7 @@ function show_menu() {
     clear
     printf "  \033[38;2;255;120;0m\033[1mMTProxy-Telemt-tg-ui\033[0m  \033[2m|  Main Menu\033[0m\n"
     printf "  \033[2m──────────────────────────────────────────────────────\033[0m\n"
-    if sudo docker ps | grep -q "${CONTAINER_NAME}"; then
+    if sudo docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
       printf "  status:  \033[32m● running\033[0m\n"
     else
       printf "  status:  \033[31m○ stopped\033[0m\n"
