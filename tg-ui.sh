@@ -83,13 +83,14 @@ services:
       - ALL
     cap_add:
       - NET_BIND_SERVICE
+      - NET_ADMIN
     security_opt:
       - no-new-privileges:true
     user: "65534:65534"
     ulimits:
       nofile:
         soft: 65536
-        hard: 65536
+        hard: 262144
     tmpfs:
       - /run/telemt
       - /etc/telemt
@@ -111,13 +112,14 @@ services:
       - ALL
     cap_add:
       - NET_BIND_SERVICE
+      - NET_ADMIN
     security_opt:
       - no-new-privileges:true
     user: "65534:65534"
     ulimits:
       nofile:
         soft: 65536
-        hard: 65536
+        hard: 262144
     tmpfs:
       - /run/telemt:rw,size=128m,mode=1777
       - /etc/telemt:rw,size=16m,mode=1777
