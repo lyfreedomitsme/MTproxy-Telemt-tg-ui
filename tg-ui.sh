@@ -651,7 +651,6 @@ function show_qr() {
     local qr_link="tg://proxy?server=${display_ip}&port=${display_port}&secret=${link_secret}"
 
     printf "  \033[2m%s · %s\033[0m\n" "$name" "$limit_text"
-    printf "  ${GREEN}%s${RESET}\n" "$link"
     echo
 
     qr_output=$(qrencode -t UTF8i -m 2 "$qr_link")
