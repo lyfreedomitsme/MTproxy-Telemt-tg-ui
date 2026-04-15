@@ -648,12 +648,13 @@ function show_qr() {
       link_secret="$secret"
     fi
     local link="https://t.me/proxy?server=${display_ip}&port=${display_port}&secret=${link_secret}"
+    local qr_link="tg://proxy?server=${display_ip}&port=${display_port}&secret=${link_secret}"
 
     printf "  \033[2m%s · %s\033[0m\n" "$name" "$limit_text"
     printf "  ${GREEN}%s${RESET}\n" "$link"
     echo
 
-    qr_output=$(qrencode -t UTF8i -m 2 "$link")
+    qr_output=$(qrencode -t UTF8i -m 2 "$qr_link")
     first_line=$(head -n 1 <<< "$qr_output")
     qr_width=${#first_line}
     padding=$(( (60 - qr_width) / 2 ))
