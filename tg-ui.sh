@@ -233,7 +233,7 @@ function get_config_toml_content() {
 ad_tag = "${AD_TAG:-00000000000000000000000000000000}"
 use_middle_proxy = true
 log_level = "${LOG_LEVEL:-normal}"
-rst_on_close = "Always"
+rst_on_close = "always"
 
 [general.modes]
 classic = false
@@ -245,7 +245,7 @@ port = ${PORT:-8443}
 
 [timeouts]
 client_keepalive = 15
-client_first_byte_idle_secs = 120
+client_handshake = 120
 relay_client_idle_soft_secs = 60
 relay_client_idle_hard_secs = 90
 
