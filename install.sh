@@ -291,6 +291,11 @@ TG_UI_SCRIPT="$PROJECT_DIR/tg-ui.sh"
 if [ -f "$TG_UI_SCRIPT" ]; then
     chmod +x "$TG_UI_SCRIPT"
     sudo ln -sf "$TG_UI_SCRIPT" /usr/local/bin/tg-ui
+    # Ensure /usr/local/bin is in PATH for all future shells (fixes CentOS minimal installs)
+    if ! echo "$PATH" | grep -q "/usr/local/bin"; then
+        echo 'export PATH="/usr/local/bin:$PATH"' | sudo tee /etc/profile.d/local-bin.sh >/dev/null
+        export PATH="/usr/local/bin:$PATH"
+    fi
     _ok "tg-ui  →  /usr/local/bin/tg-ui"
 else
     _fail "tg-ui.sh not found in $PROJECT_DIR"
@@ -373,6 +378,16 @@ echo
 printf "  \033[1mLaunching proxy\033[0m\n"
 
 if /usr/local/bin/tg-ui start; then
+    # Open proxy port in firewall (firewalld on CentOS/RHEL, ufw on Ubuntu)
+    if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state 2>/dev/null | grep -q "running"; then
+        firewall-cmd --permanent --add-port="${PORT:-8443}/tcp" >/dev/null 2>&1 && \
+        firewall-cmd --reload >/dev/null 2>&1 && \
+        _ok "Firewall: port ${PORT:-8443}/tcp opened  (firewalld)"
+    elif command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "active"; then
+        ufw allow "${PORT:-8443}/tcp" >/dev/null 2>&1 && \
+        _ok "Firewall: port ${PORT:-8443}/tcp opened  (ufw)"
+    fi
+
     # Fix ownership: install runs as root, but tg-ui should be usable without sudo
     REAL_USER="${SUDO_USER:-$USER}"
     if [ "$REAL_USER" != "root" ]; then
