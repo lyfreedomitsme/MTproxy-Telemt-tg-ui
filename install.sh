@@ -111,7 +111,15 @@ if ! command -v docker >/dev/null 2>&1; then
             run_with_spinner "Enabling Docker" bash -c "sudo systemctl enable --now docker"
             ;;
         yum)
-            # CentOS 7
+            # CentOS 7 — EOL June 2024: standard mirrors are dead, switch to vault archive
+            if grep -q "CentOS Linux release 7" /etc/centos-release 2>/dev/null; then
+                run_with_spinner "Fixing CentOS 7 EOL repos (vault.centos.org)" bash -c "
+                    sed -i 's/mirror.centos.org/vault.centos.org/g' /etc/yum.repos.d/CentOS-*.repo 2>/dev/null
+                    sed -i 's|^mirrorlist=|#mirrorlist=|g'          /etc/yum.repos.d/CentOS-*.repo 2>/dev/null
+                    sed -i 's|^#baseurl=|baseurl=|g'                /etc/yum.repos.d/CentOS-*.repo 2>/dev/null
+                    yum clean all >/dev/null 2>&1
+                "
+            fi
             _add_docker_repo_rpm yum
             run_with_spinner "Installing EPEL" sudo yum install -y epel-release
             # Remove conflicting runc if present (common CentOS 7 issue with Docker CE)
