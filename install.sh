@@ -105,7 +105,8 @@ if ! command -v docker >/dev/null 2>&1; then
             ;;
         dnf)
             _add_docker_repo_rpm dnf
-            run_with_spinner "Installing EPEL" sudo dnf install -y epel-release
+            # EPEL exists on RHEL/CentOS/Rocky/Alma but NOT on Fedora — skip silently if missing
+            sudo dnf install -y epel-release >/dev/null 2>&1 || true
             run_with_spinner "Installing Docker CE" sudo dnf install -y \
                 docker-ce docker-ce-cli containerd.io docker-compose-plugin git vim-common qrencode
             run_with_spinner "Enabling Docker" bash -c "sudo systemctl enable --now docker"
@@ -113,7 +114,9 @@ if ! command -v docker >/dev/null 2>&1; then
         yum)
             # CentOS 7 (EOL): use official Docker install script — bypasses broken mirrors entirely
             run_with_spinner "Installing Docker (get.docker.com)" bash -c "curl -fsSL https://get.docker.com | sh"
-            run_with_spinner "Installing git + vim-common" sudo yum install -y git vim-common
+            # EPEL needed for qrencode on CentOS 7; epel-release itself is in base repo
+            sudo yum install -y epel-release >/dev/null 2>&1 || true
+            run_with_spinner "Installing git + tools" sudo yum install -y git vim-common qrencode
             run_with_spinner "Enabling Docker" bash -c "sudo systemctl enable docker && sudo systemctl start docker"
             ;;
         zypper)
