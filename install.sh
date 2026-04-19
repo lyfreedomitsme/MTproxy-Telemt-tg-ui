@@ -46,7 +46,8 @@ run_with_spinner() {
     printf "\r  \033[32m%s\033[0m  \033[2m%s\033[0m " "${frames[$((i % 10))]}" "$label"
     i=$((i+1)); sleep 0.08
   done
-  wait $pid; local rc=$?
+  local rc=0
+  wait $pid || rc=$?
   if [ $rc -eq 0 ]; then
     printf "\r  \033[32m✓\033[0m  \033[2m%-60s\033[0m\n" "$label"
   else
@@ -113,6 +114,8 @@ if ! command -v docker >/dev/null 2>&1; then
             # CentOS 7
             _add_docker_repo_rpm yum
             run_with_spinner "Installing EPEL" sudo yum install -y epel-release
+            # Remove conflicting runc if present (common CentOS 7 issue with Docker CE)
+            sudo yum remove -y runc >/dev/null 2>&1 || true
             run_with_spinner "Installing Docker CE" sudo yum install -y \
                 docker-ce docker-ce-cli containerd.io git vim-common qrencode
             run_with_spinner "Enabling Docker" bash -c "sudo systemctl enable docker && sudo systemctl start docker"
