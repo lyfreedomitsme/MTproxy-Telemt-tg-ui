@@ -112,11 +112,20 @@ if ! command -v docker >/dev/null 2>&1; then
             run_with_spinner "Enabling Docker" bash -c "sudo systemctl enable --now docker"
             ;;
         yum)
-            # CentOS 7 (EOL): use official Docker install script — bypasses broken mirrors entirely
-            run_with_spinner "Installing Docker (get.docker.com)" bash -c "curl -fsSL https://get.docker.com | sh"
-            # EPEL needed for qrencode on CentOS 7; epel-release itself is in base repo
+            # CentOS 7 EOL (June 2024): ALL standard mirrors are dead.
+            # Must redirect repos to vault.centos.org BEFORE any yum operation —
+            # even get.docker.com fails because it calls yum makecache internally.
+            run_with_spinner "Fixing CentOS 7 repos → vault.centos.org" bash -c "
+                sed -i 's/mirror.centos.org/vault.centos.org/g' /etc/yum.repos.d/CentOS-*.repo
+                sed -i 's|^mirrorlist=|#mirrorlist=|g'          /etc/yum.repos.d/CentOS-*.repo
+                sed -i 's|^#baseurl=|baseurl=|g'                /etc/yum.repos.d/CentOS-*.repo
+                yum clean all -q
+            "
+            _add_docker_repo_rpm yum
+            sudo yum remove -y runc >/dev/null 2>&1 || true
             sudo yum install -y epel-release >/dev/null 2>&1 || true
-            run_with_spinner "Installing git + tools" sudo yum install -y git vim-common qrencode
+            run_with_spinner "Installing Docker CE + tools" sudo yum install -y \
+                docker-ce docker-ce-cli containerd.io git vim-common qrencode
             run_with_spinner "Enabling Docker" bash -c "sudo systemctl enable docker && sudo systemctl start docker"
             ;;
         zypper)
