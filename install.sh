@@ -69,41 +69,139 @@ printf "  \033[2m─────────────────────
 echo
 printf "  \033[1mChecking dependencies\033[0m\n"
 
+# Detect package manager once
+_PKG=""
+if   command -v apt     >/dev/null 2>&1; then _PKG="apt"
+elif command -v dnf     >/dev/null 2>&1; then _PKG="dnf"
+elif command -v yum     >/dev/null 2>&1; then _PKG="yum"
+elif command -v zypper  >/dev/null 2>&1; then _PKG="zypper"
+elif command -v pacman  >/dev/null 2>&1; then _PKG="pacman"
+elif command -v apk     >/dev/null 2>&1; then _PKG="apk"
+fi
+
+# Add Docker CE repo for rpm-based distros (yum/dnf)
+_add_docker_repo_rpm() {
+    local mgr="$1"
+    # yum-utils provides yum-config-manager (works for both yum and dnf)
+    if ! command -v yum-config-manager >/dev/null 2>&1; then
+        run_with_spinner "Installing yum-utils" sudo "$mgr" install -y yum-utils
+    fi
+    if ! sudo "$mgr" repolist 2>/dev/null | grep -q "docker-ce"; then
+        local os_id
+        os_id=$(grep -oP '(?<=^ID=).+' /etc/os-release 2>/dev/null | tr -d '"' || echo "centos")
+        local repo_url="https://download.docker.com/linux/centos/docker-ce.repo"
+        [[ "$os_id" == "fedora" ]] && repo_url="https://download.docker.com/linux/fedora/docker-ce.repo"
+        run_with_spinner "Adding Docker CE repo" sudo yum-config-manager --add-repo "$repo_url"
+    fi
+}
+
+# ── Docker ────────────────────────────────────────────────────
 if ! command -v docker >/dev/null 2>&1; then
     _log "Docker not found — installing..."
-    if command -v apt >/dev/null 2>&1; then
-        run_with_spinner "Installing Docker" sudo apt install -y docker.io xxd git qrencode
-    elif command -v yum >/dev/null 2>&1; then
-        run_with_spinner "Installing Docker" sudo yum install -y docker xxd git qrencode
-        sudo systemctl start docker && sudo systemctl enable docker
-    else
-        _fail "Cannot install Docker automatically. Please install it manually."
-        exit 1
-    fi
+    case "$_PKG" in
+        apt)
+            run_with_spinner "Installing Docker" sudo apt install -y docker.io git xxd qrencode
+            ;;
+        dnf)
+            _add_docker_repo_rpm dnf
+            run_with_spinner "Installing EPEL" sudo dnf install -y epel-release
+            run_with_spinner "Installing Docker CE" sudo dnf install -y \
+                docker-ce docker-ce-cli containerd.io docker-compose-plugin git vim-common qrencode
+            run_with_spinner "Enabling Docker" bash -c "sudo systemctl enable --now docker"
+            ;;
+        yum)
+            # CentOS 7
+            _add_docker_repo_rpm yum
+            run_with_spinner "Installing EPEL" sudo yum install -y epel-release
+            run_with_spinner "Installing Docker CE" sudo yum install -y \
+                docker-ce docker-ce-cli containerd.io git vim-common qrencode
+            run_with_spinner "Enabling Docker" bash -c "sudo systemctl enable docker && sudo systemctl start docker"
+            ;;
+        zypper)
+            run_with_spinner "Installing Docker" sudo zypper install -y docker git vim qrencode
+            run_with_spinner "Enabling Docker" bash -c "sudo systemctl enable --now docker"
+            ;;
+        pacman)
+            run_with_spinner "Installing Docker" sudo pacman -S --noconfirm docker git vim qrencode
+            run_with_spinner "Enabling Docker" bash -c "sudo systemctl enable --now docker"
+            ;;
+        apk)
+            run_with_spinner "Installing Docker" sudo apk add docker git vim qrencode
+            run_with_spinner "Enabling Docker" bash -c "sudo rc-update add docker boot && sudo service docker start"
+            ;;
+        *)
+            _fail "Cannot install Docker automatically. Please install it manually."
+            exit 1
+            ;;
+    esac
 else
     _ok "Docker  $(docker --version 2>/dev/null | sed 's/Docker version /v/' | cut -d, -f1)"
 fi
 
+# ── Docker Compose ────────────────────────────────────────────
 if ! docker-compose version >/dev/null 2>&1 && ! docker compose version >/dev/null 2>&1; then
     _log "docker-compose not found — installing..."
-    if command -v apt >/dev/null 2>&1; then
-        run_with_spinner "Installing docker-compose" sudo apt install -y docker-compose
-    elif command -v yum >/dev/null 2>&1; then
-        run_with_spinner "Installing docker-compose" sudo yum install -y docker-compose
-    else
-        _fail "Cannot install docker-compose automatically."
-        exit 1
-    fi
+    case "$_PKG" in
+        apt)
+            run_with_spinner "Installing docker-compose" sudo apt install -y docker-compose
+            ;;
+        dnf)
+            # docker-compose-plugin (installed above) provides 'docker compose'
+            # fallback: standalone package or pip
+            if ! run_with_spinner "Installing docker-compose" sudo dnf install -y docker-compose-plugin; then
+                run_with_spinner "Installing docker-compose via pip" \
+                    bash -c "pip3 install docker-compose 2>/dev/null || pip install docker-compose"
+            fi
+            ;;
+        yum)
+            # CentOS 7: no standalone package in Docker CE repo, use pip
+            if ! run_with_spinner "Installing docker-compose" sudo yum install -y docker-compose; then
+                run_with_spinner "Installing docker-compose via pip" \
+                    bash -c "pip3 install docker-compose 2>/dev/null || pip install docker-compose"
+            fi
+            ;;
+        zypper)
+            run_with_spinner "Installing docker-compose" sudo zypper install -y docker-compose
+            ;;
+        pacman)
+            run_with_spinner "Installing docker-compose" sudo pacman -S --noconfirm docker-compose
+            ;;
+        apk)
+            run_with_spinner "Installing docker-compose" sudo apk add docker-compose
+            ;;
+        *)
+            _fail "Cannot install docker-compose automatically."
+            exit 1
+            ;;
+    esac
 else
     _ok "Docker Compose"
 fi
 
+# ── git + xxd + qrencode ──────────────────────────────────────
 if ! command -v git >/dev/null 2>&1 || ! command -v xxd >/dev/null 2>&1; then
-    if command -v apt >/dev/null 2>&1; then
-        run_with_spinner "Installing git + xxd + qrencode" sudo apt install -y git xxd qrencode
-    elif command -v yum >/dev/null 2>&1; then
-        run_with_spinner "Installing git + xxd + qrencode" sudo yum install -y git xxd qrencode
-    fi
+    case "$_PKG" in
+        apt)
+            run_with_spinner "Installing git + xxd + qrencode" sudo apt install -y git xxd qrencode
+            ;;
+        dnf)
+            sudo dnf install -y epel-release >/dev/null 2>&1 || true
+            run_with_spinner "Installing git + xxd + qrencode" sudo dnf install -y git vim-common qrencode
+            ;;
+        yum)
+            sudo yum install -y epel-release >/dev/null 2>&1 || true
+            run_with_spinner "Installing git + xxd + qrencode" sudo yum install -y git vim-common qrencode
+            ;;
+        zypper)
+            run_with_spinner "Installing git + xxd + qrencode" sudo zypper install -y git vim qrencode
+            ;;
+        pacman)
+            run_with_spinner "Installing git + xxd + qrencode" sudo pacman -S --noconfirm git vim qrencode
+            ;;
+        apk)
+            run_with_spinner "Installing git + xxd + qrencode" sudo apk add git vim qrencode
+            ;;
+    esac
 else
     _ok "git + xxd"
 fi
@@ -129,8 +227,14 @@ if [[ "${BASH_SOURCE[0]}" == "/dev/fd/"* ]]; then
         echo
         printf "  \033[1mCloning repository\033[0m\n"
         if ! command -v git >/dev/null 2>&1; then
-            if command -v apt >/dev/null 2>&1; then sudo apt update && sudo apt install -y git
-            elif command -v yum >/dev/null 2>&1; then sudo yum install -y git; fi
+            case "$_PKG" in
+                apt)    sudo apt install -y git ;;
+                dnf)    sudo dnf install -y git ;;
+                yum)    sudo yum install -y git ;;
+                zypper) sudo zypper install -y git ;;
+                pacman) sudo pacman -S --noconfirm git ;;
+                apk)    sudo apk add git ;;
+            esac
         fi
         rm -rf "$INSTALL_DIR"
         run_with_spinner "Cloning MTProxy-Telemt-tg-ui" git clone "$REPO_URL" "$INSTALL_DIR"
@@ -182,11 +286,76 @@ else
     exit 1
 fi
 
-TMP_CRON=$(mktemp)
-(crontab -l 2>/dev/null | grep -v "tg-ui --auto" || true; echo "@reboot sleep 15 && /usr/local/bin/tg-ui --auto") > "$TMP_CRON"
-crontab "$TMP_CRON" || true
-rm -f "$TMP_CRON"
-_ok "Autostart registered  (@reboot)"
+# ── Autostart (cron → systemd → OpenRC fallback) ─────────────
+_setup_autostart_done=false
+
+# 1) Try cron (@reboot) — works on Ubuntu/Debian/CentOS/RHEL out of the box
+if ! $_setup_autostart_done && command -v crontab >/dev/null 2>&1; then
+    _TMP_CRON=$(mktemp)
+    (crontab -l 2>/dev/null | grep -v "tg-ui --auto" || true
+     echo "@reboot sleep 15 && /usr/local/bin/tg-ui --auto") > "$_TMP_CRON"
+    if crontab "$_TMP_CRON" 2>/dev/null; then
+        _ok "Autostart registered  (@reboot cron)"
+        _setup_autostart_done=true
+    fi
+    rm -f "$_TMP_CRON"
+fi
+
+# 2) If cron missing — install cronie and retry (Arch/Fedora/openSUSE)
+if ! $_setup_autostart_done && ! command -v crontab >/dev/null 2>&1; then
+    case "$_PKG" in
+        pacman) run_with_spinner "Installing cronie" sudo pacman -S --noconfirm cronie
+                sudo systemctl enable --now cronie >/dev/null 2>&1 ;;
+        dnf)    run_with_spinner "Installing cronie" sudo dnf install -y cronie
+                sudo systemctl enable --now crond >/dev/null 2>&1 ;;
+        zypper) run_with_spinner "Installing cron"   sudo zypper install -y cronie
+                sudo systemctl enable --now cron >/dev/null 2>&1 ;;
+    esac
+    if command -v crontab >/dev/null 2>&1; then
+        _TMP_CRON=$(mktemp)
+        (crontab -l 2>/dev/null | grep -v "tg-ui --auto" || true
+         echo "@reboot sleep 15 && /usr/local/bin/tg-ui --auto") > "$_TMP_CRON"
+        crontab "$_TMP_CRON" 2>/dev/null && _setup_autostart_done=true
+        rm -f "$_TMP_CRON"
+        $_setup_autostart_done && _ok "Autostart registered  (@reboot cron)"
+    fi
+fi
+
+# 3) Fallback: systemd service (all systemd distros)
+if ! $_setup_autostart_done && command -v systemctl >/dev/null 2>&1; then
+    sudo tee /etc/systemd/system/tg-ui-autostart.service >/dev/null <<'UNIT'
+[Unit]
+Description=MTProxy Telemt autostart
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStartPre=/bin/sleep 15
+ExecStart=/usr/local/bin/tg-ui --auto
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    sudo systemctl daemon-reload >/dev/null 2>&1
+    sudo systemctl enable tg-ui-autostart >/dev/null 2>&1
+    _ok "Autostart registered  (systemd)"
+    _setup_autostart_done=true
+fi
+
+# 4) Fallback: OpenRC local.d (Alpine)
+if ! $_setup_autostart_done && command -v rc-update >/dev/null 2>&1; then
+    sudo mkdir -p /etc/local.d
+    printf '#!/bin/sh\nsleep 15 && /usr/local/bin/tg-ui --auto &\n' \
+        | sudo tee /etc/local.d/tg-ui.start >/dev/null
+    sudo chmod +x /etc/local.d/tg-ui.start
+    sudo rc-update add local default >/dev/null 2>&1 || true
+    _ok "Autostart registered  (OpenRC)"
+    _setup_autostart_done=true
+fi
+
+$_setup_autostart_done || _fail "Could not register autostart — start manually with: tg-ui start"
 
 # ── Phase 4: Startup ──────────────────────────────────────────
 echo

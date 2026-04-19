@@ -26,6 +26,29 @@ ok()   { _ok "$1"; }
 fail() { _fail "$1"; }
 info() { _log "$1"; }
 
+# Package manager helpers (used for on-demand installs inside tg-ui)
+_detect_pkg() {
+  if   command -v apt-get >/dev/null 2>&1; then echo "apt"
+  elif command -v dnf     >/dev/null 2>&1; then echo "dnf"
+  elif command -v yum     >/dev/null 2>&1; then echo "yum"
+  elif command -v zypper  >/dev/null 2>&1; then echo "zypper"
+  elif command -v pacman  >/dev/null 2>&1; then echo "pacman"
+  elif command -v apk     >/dev/null 2>&1; then echo "apk"
+  fi
+}
+
+_pkg_install() {
+  local _pm; _pm=$(_detect_pkg)
+  case "$_pm" in
+    apt)    sudo apt-get install -y "$@" >/dev/null 2>&1 ;;
+    dnf)    sudo dnf install -y "$@" >/dev/null 2>&1 ;;
+    yum)    sudo yum install -y "$@" >/dev/null 2>&1 ;;
+    zypper) sudo zypper install -y "$@" >/dev/null 2>&1 ;;
+    pacman) sudo pacman -S --noconfirm "$@" >/dev/null 2>&1 ;;
+    apk)    sudo apk add "$@" >/dev/null 2>&1 ;;
+  esac
+}
+
 # Resolve the real user's home directory (even if running via sudo)
 REAL_HOME="$HOME"
 if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
@@ -593,11 +616,7 @@ function show_qr() {
 
   if ! command -v qrencode >/dev/null 2>&1; then
     printf "  \033[33m⚙\033[0m  Installing qrencode...\n"
-    if command -v apt-get >/dev/null 2>&1; then
-      sudo apt-get install -y qrencode >/dev/null 2>&1
-    elif command -v yum >/dev/null 2>&1; then
-      sudo yum install -y qrencode >/dev/null 2>&1
-    fi
+    _pkg_install qrencode
     if ! command -v qrencode >/dev/null 2>&1; then
       printf "  \033[31m✗\033[0m  Failed to install qrencode. Run: sudo apt-get install -y qrencode\n"
       printf "  \033[2mPress Enter to return...\033[0m"; read; return
@@ -1019,10 +1038,12 @@ function setup_mikrotik_cascade() {
   if ! command -v wg &> /dev/null; then
     printf "  \033[33m!\033[0m  Wireguard tools not installed. Installing...\n"
     local pkgs="wireguard-tools iptables iproute2"
-    if _is_ipv6 "$DISPLAY_IP"; then
+    # ip6tables is a separate apt package; on rpm/arch/apk it's bundled with iptables
+    if _is_ipv6 "$DISPLAY_IP" && [ "$(_detect_pkg)" = "apt" ]; then
       pkgs="$pkgs ip6tables"
     fi
-    apt-get update && apt-get install -y $pkgs
+    [ "$(_detect_pkg)" = "apt" ] && sudo apt-get update -qq >/dev/null 2>&1
+    _pkg_install $pkgs
     if ! command -v wg &> /dev/null; then
        printf "  \033[31mx\033[0m  Failed to install wireguard-tools. Please install manually.\n"
        read -p "  Press Enter to return..."
@@ -1030,7 +1051,7 @@ function setup_mikrotik_cascade() {
     fi
   elif _is_ipv6 "$DISPLAY_IP" && ! command -v ip6tables &> /dev/null; then
     printf "  \033[33m!\033[0m  Installing ip6tables for IPv6 support...\n"
-    apt-get update && apt-get install -y ip6tables >/dev/null 2>&1
+    _pkg_install ip6tables
   fi
 
   if [ "$(sysctl -n net.ipv4.ip_forward)" != "1" ]; then
