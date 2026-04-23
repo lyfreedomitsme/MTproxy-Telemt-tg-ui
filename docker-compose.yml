@@ -1,6 +1,7 @@
 services:
   telemt:
     image: ghcr.io/telemt/telemt:latest
+    pull_policy: always
     container_name: telemt-proxy
     restart: unless-stopped
     network_mode: "host"

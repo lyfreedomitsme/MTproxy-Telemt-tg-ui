@@ -126,6 +126,7 @@ EOF
 services:
   telemt:
     image: ghcr.io/telemt/telemt:latest
+    pull_policy: always
     container_name: telemt-proxy
     restart: unless-stopped
     network_mode: "host"
@@ -440,6 +441,9 @@ function start_proxy() {
   cd "$PROJECT_DIR"
   _write_compose_file
   sudo $DOCKER_COMPOSE down >/dev/null 2>&1
+
+  printf "  \033[2mPulling latest image...\033[0m\n"
+  sudo docker pull ghcr.io/telemt/telemt:latest >/dev/null 2>&1 && _ok "Image up to date" || true
 
   if sudo $DOCKER_COMPOSE up -d >/dev/null 2>&1; then
     local i=0
