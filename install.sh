@@ -10,7 +10,20 @@ if ! command -v sudo >/dev/null; then
 fi
 
 REPO_URL="https://github.com/lyfreedomitsme/MTproxy-Telemt-tg-ui.git"
-INSTALL_DIR="$HOME/MTproxy-Telmet-tg-ui"
+INSTALL_DIR="$HOME/MTproxy-Telemt-tg-ui"
+OLD_INSTALL_DIR="$HOME/MTproxy-Telmet-tg-ui"  # legacy typo name
+
+# Migrate old folder name (Telmet → Telemt) transparently
+if [ -d "$OLD_INSTALL_DIR" ] && [ ! -d "$INSTALL_DIR" ]; then
+  mv "$OLD_INSTALL_DIR" "$INSTALL_DIR"
+  # Update symlink if it still points to the old path
+  if [ -L /usr/local/bin/tg-ui ]; then
+    _old_target=$(readlink /usr/local/bin/tg-ui 2>/dev/null || true)
+    if [[ "$_old_target" == *"MTproxy-Telmet-tg-ui"* ]]; then
+      ln -sf "$INSTALL_DIR/tg-ui.sh" /usr/local/bin/tg-ui 2>/dev/null || true
+    fi
+  fi
+fi
 
 # ── Colors ────────────────────────────────────────────────────
 RESET='\033[0m'
