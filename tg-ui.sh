@@ -1024,6 +1024,61 @@ function advanced_security_menu() {
   done
 }
 
+function _install_cascade_watchdog() {
+  local WATCHDOG="/usr/local/bin/telemt-wg-watchdog"
+  local CRON="/etc/cron.d/telemt-wg-watchdog"
+
+  cat > "$WATCHDOG" <<'WATCHDOG_EOF'
+#!/bin/bash
+# Detects stale conntrack state (WireGuard handshake fresh but traffic frozen) and restarts wg-telemt
+WG_IFACE="wg-telemt"
+STATE_FILE="/run/telemt-wg-watchdog.state"
+STALE_SECS=300
+
+ip link show "$WG_IFACE" &>/dev/null || exit 0
+
+HS_RAW=$(wg show "$WG_IFACE" latest-handshakes 2>/dev/null | awk '{print $2}')
+[ -z "$HS_RAW" ] && exit 0
+HS_AGE=$(( $(date +%s) - HS_RAW ))
+
+_restart_tunnel() {
+  logger -t telemt-wg-watchdog "$1"
+  conntrack -D -i "$WG_IFACE" 2>/dev/null || true
+  wg-quick down "$WG_IFACE" 2>/dev/null
+  sleep 1
+  wg-quick up "$WG_IFACE" 2>/dev/null
+  rm -f "$STATE_FILE"
+}
+
+# Handshake stale > 5 min despite keepalive=25s → WireGuard broken
+if [ "$HS_AGE" -gt 300 ]; then
+  _restart_tunnel "Stale handshake (${HS_AGE}s) — restarting $WG_IFACE"
+  exit 0
+fi
+
+# Handshake fresh but rx bytes not growing → stale conntrack entries
+RX_NOW=$(cat /sys/class/net/$WG_IFACE/statistics/rx_bytes 2>/dev/null || echo "0")
+TS_NOW=$(date +%s)
+
+if [ -f "$STATE_FILE" ]; then
+  RX_LAST=$(awk '/^rx/{print $2}' "$STATE_FILE" 2>/dev/null || echo "0")
+  TS_LAST=$(awk '/^ts/{print $2}' "$STATE_FILE" 2>/dev/null || echo "$TS_NOW")
+  ELAPSED=$(( TS_NOW - TS_LAST ))
+  if [ "$ELAPSED" -ge "$STALE_SECS" ] && [ "$RX_LAST" -gt 0 ] && [ "$RX_NOW" -le "$RX_LAST" ]; then
+    _restart_tunnel "Stale conntrack (${ELAPSED}s no new bytes, handshake ${HS_AGE}s ago) — restarting $WG_IFACE"
+    exit 0
+  fi
+fi
+
+printf "rx %s\nts %s\n" "$RX_NOW" "$TS_NOW" > "$STATE_FILE"
+WATCHDOG_EOF
+
+  chmod +x "$WATCHDOG"
+  printf "*/5 * * * * root %s\n" "$WATCHDOG" > "$CRON"
+  chmod 644 "$CRON"
+  printf "  \033[32m✔\033[0m  Watchdog installed (checks every 5 min)\n"
+}
+
 function setup_mikrotik_cascade() {
   clear
   printf "  \033[38;2;255;120;0m\033[1mMTProxy-Telemt-tg-ui\033[0m  \033[2m|  Mikrotik Cascade Setup\033[0m\n"
@@ -1099,6 +1154,17 @@ function setup_mikrotik_cascade() {
       config_updated=true
       printf "  \033[32m✔\033[0m  PersistentKeepalive = 25 added\n"
     fi
+
+    # Patch existing config: flush stale conntrack entries on PostUp (fixes "tunnel up but no traffic" bug)
+    if ! grep -q "conntrack -D -i wg-telemt" "$CONF_FILE" 2>/dev/null; then
+      printf "  \033[2mPatching config to flush stale conntrack on tunnel restart...\033[0m\n"
+      sed -i '/^PostUp = .*docker restart/i PostUp = conntrack -D -i wg-telemt 2>\/dev\/null || true' "$CONF_FILE"
+      config_updated=true
+      printf "  \033[32m✔\033[0m  Conntrack flush on restart added\n"
+    fi
+
+    # Install watchdog if not present
+    _install_cascade_watchdog
 
     # Ensure systemd service is enabled for auto-start on reboot
     if ! systemctl is-enabled wg-quick@wg-telemt &>/dev/null; then
@@ -1205,6 +1271,7 @@ PostUp = ip6tables -t mangle -A PREROUTING -i wg-telemt ! -s $WG_IP_MIKROTIK -j 
 PostUp = ip6tables -t mangle -A PREROUTING -m connmark --mark 200 -j MARK --set-mark 200
 PostUp = ip -6 rule add fwmark 200 table 200 priority 90 2>/dev/null || true
 PostUp = ip6tables -t nat -I POSTROUTING 1 -o wg-telemt -m connmark --mark 200 -j SNAT --to-source $WG_IP_SERVER
+PostUp = conntrack -D -i wg-telemt 2>/dev/null || true
 PostUp = (sleep 0.5; docker restart ${CONTAINER_NAME}) > /dev/null 2>&1 &
 PostDown = ip6tables -t mangle -D PREROUTING -i wg-telemt ! -s $WG_IP_MIKROTIK -j CONNMARK --set-mark 200 || true
 PostDown = ip6tables -t mangle -D PREROUTING -m connmark --mark 200 -j MARK --set-mark 200 || true
@@ -1230,6 +1297,7 @@ PostUp = iptables -t mangle -A PREROUTING -i wg-telemt ! -s $WG_IP_MIKROTIK -j C
 PostUp = iptables -t mangle -A PREROUTING -m connmark --mark 200 -j MARK --set-mark 200
 PostUp = ip rule add fwmark 200 table 200 priority 90 2>/dev/null || true
 PostUp = iptables -t nat -I POSTROUTING 1 -o wg-telemt -m connmark --mark 200 -j SNAT --to-source $WG_IP_SERVER
+PostUp = conntrack -D -i wg-telemt 2>/dev/null || true
 PostUp = (sleep 0.5; docker restart ${CONTAINER_NAME}) > /dev/null 2>&1 &
 PostDown = iptables -t mangle -D PREROUTING -i wg-telemt ! -s $WG_IP_MIKROTIK -j CONNMARK --set-mark 200 || true
 PostDown = iptables -t mangle -D PREROUTING -m connmark --mark 200 -j MARK --set-mark 200 || true
@@ -1266,6 +1334,7 @@ EOF
   fi
   
   systemctl enable --now wg-quick@wg-telemt &> /dev/null || true
+  _install_cascade_watchdog
   sleep 1
 
   if ! ip link show wg-telemt &>/dev/null; then
