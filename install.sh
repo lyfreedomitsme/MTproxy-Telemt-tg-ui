@@ -11,19 +11,18 @@ fi
 
 REPO_URL="https://github.com/lyfreedomitsme/MTproxy-Telemt-tg-ui.git"
 INSTALL_DIR="$HOME/MTproxy-Telemt-tg-ui"
-OLD_INSTALL_DIR="$HOME/MTproxy-Telmet-tg-ui"  # legacy typo name
 
-# Migrate old folder name (Telmet → Telemt) transparently
-if [ -d "$OLD_INSTALL_DIR" ] && [ ! -d "$INSTALL_DIR" ]; then
-  mv "$OLD_INSTALL_DIR" "$INSTALL_DIR"
-  # Update symlink if it still points to the old path
-  if [ -L /usr/local/bin/tg-ui ]; then
-    _old_target=$(readlink /usr/local/bin/tg-ui 2>/dev/null || true)
-    if [[ "$_old_target" == *"MTproxy-Telmet-tg-ui"* ]]; then
-      ln -sf "$INSTALL_DIR/tg-ui.sh" /usr/local/bin/tg-ui 2>/dev/null || true
+# Migrate any old wrong-spelling folder → correct name (Telamt/Telmet → Telemt)
+for _old_dir in "$HOME/MTproxy-Telamt-tg-ui" "$HOME/MTproxy-Telmet-tg-ui"; do
+  if [ -d "$_old_dir" ] && [ ! -d "$INSTALL_DIR" ]; then
+    mv "$_old_dir" "$INSTALL_DIR"
+    if [ -L /usr/local/bin/tg-ui ]; then
+      _sym=$(readlink /usr/local/bin/tg-ui 2>/dev/null || true)
+      [[ "$_sym" == *"MTproxy-Tel"* ]] && ln -sf "$INSTALL_DIR/tg-ui.sh" /usr/local/bin/tg-ui 2>/dev/null || true
     fi
+    break
   fi
-fi
+done
 
 # ── Colors ────────────────────────────────────────────────────
 RESET='\033[0m'
@@ -391,6 +390,9 @@ echo
 printf "  \033[1mLaunching proxy\033[0m\n"
 
 if /usr/local/bin/tg-ui start; then
+    # Reload PORT — tg-ui may have auto-switched to a different port
+    [ -f "$HOME/.telemt-ui-config.env" ] && source "$HOME/.telemt-ui-config.env"
+
     # Open proxy port in firewall (firewalld on CentOS/RHEL, ufw on Ubuntu)
     if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state 2>/dev/null | grep -q "running"; then
         firewall-cmd --permanent --add-port="${PORT:-8443}/tcp" >/dev/null 2>&1 && \
