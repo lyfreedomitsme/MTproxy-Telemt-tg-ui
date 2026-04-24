@@ -609,12 +609,10 @@ function show_link() {
     else
       link_secret="$secret"
     fi
-    local link="https://t.me/proxy?server=${display_ip}&port=${display_port}&secret=${link_secret}"
-    local tg_link="tg://proxy?server=${display_ip}&port=${display_port}&secret=${link_secret}"
+    local link="tg://proxy?server=${display_ip}&port=${display_port}&secret=${link_secret}"
 
     printf "  \033[2m─── %s · %s \033[0m\n" "$name" "$limit_text"
     printf "  ${GREEN}%s${RESET}\n" "$link"
-    printf "  ${GREEN}%s${RESET}\n" "$tg_link"
   done < "$USERS_DB"
   echo
 }
