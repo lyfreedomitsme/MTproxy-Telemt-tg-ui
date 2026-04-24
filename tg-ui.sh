@@ -270,10 +270,10 @@ tls = true
 port = ${PORT:-8443}
 
 [timeouts]
-client_keepalive = 15
+client_keepalive = 10
 client_handshake = 120
-relay_client_idle_soft_secs = 60
-relay_client_idle_hard_secs = 90
+relay_client_idle_soft_secs = 30
+relay_client_idle_hard_secs = 45
 
 EOF
 
@@ -426,16 +426,18 @@ function start_proxy() {
   save_config_env
   sync_mikrotik_commands  # Auto-refresh Mikrotik commands if port/IP changed
 
-  # Apply TCP keepalive to auto-close dead connections (fixes "infinite loading" on reconnect)
-  if [ "$(sysctl -n net.ipv4.tcp_keepalive_time 2>/dev/null)" != "60" ]; then
-    sudo sysctl -w net.ipv4.tcp_keepalive_time=60 >/dev/null 2>&1
-    sudo sysctl -w net.ipv4.tcp_keepalive_intvl=10 >/dev/null 2>&1
+  # Apply aggressive TCP keepalive to detect dead connections FAST (fixes "infinite loading")
+  # Dead connection detected in: 10 + (5 × 3) = 25 seconds
+  local _want_ka_time=10
+  if [ "$(sysctl -n net.ipv4.tcp_keepalive_time 2>/dev/null)" != "$_want_ka_time" ]; then
+    sudo sysctl -w net.ipv4.tcp_keepalive_time=$_want_ka_time >/dev/null 2>&1
+    sudo sysctl -w net.ipv4.tcp_keepalive_intvl=5 >/dev/null 2>&1
     sudo sysctl -w net.ipv4.tcp_keepalive_probes=3 >/dev/null 2>&1
-    grep -q "net.ipv4.tcp_keepalive_time" /etc/sysctl.conf 2>/dev/null || {
-      echo "net.ipv4.tcp_keepalive_time=60" | sudo tee -a /etc/sysctl.conf >/dev/null
-      echo "net.ipv4.tcp_keepalive_intvl=10" | sudo tee -a /etc/sysctl.conf >/dev/null
-      echo "net.ipv4.tcp_keepalive_probes=3" | sudo tee -a /etc/sysctl.conf >/dev/null
-    }
+    # Persist in sysctl.conf (replace old values if present)
+    sudo sed -i '/net.ipv4.tcp_keepalive_/d' /etc/sysctl.conf 2>/dev/null
+    echo "net.ipv4.tcp_keepalive_time=$_want_ka_time" | sudo tee -a /etc/sysctl.conf >/dev/null
+    echo "net.ipv4.tcp_keepalive_intvl=5" | sudo tee -a /etc/sysctl.conf >/dev/null
+    echo "net.ipv4.tcp_keepalive_probes=3" | sudo tee -a /etc/sysctl.conf >/dev/null
   fi
 
   cd "$PROJECT_DIR"
@@ -1030,10 +1032,17 @@ function _install_cascade_watchdog() {
 
   cat > "$WATCHDOG" <<'WATCHDOG_EOF'
 #!/bin/bash
-# Detects stale conntrack state (WireGuard handshake fresh but traffic frozen) and restarts wg-telemt
+# Detects stale WireGuard tunnel states and auto-recovers wg-telemt
+# Checks: handshake age, rx bytes growth, and ping connectivity
 WG_IFACE="wg-telemt"
 STATE_FILE="/run/telemt-wg-watchdog.state"
-STALE_SECS=300
+STALE_SECS=120
+PEER_IP="10.99.99.2"
+
+# Detect IPv6 cascade and adjust peer IP
+if grep -q "fd00::" /etc/wireguard/wg-telemt.conf 2>/dev/null; then
+  PEER_IP="fd00::2"
+fi
 
 ip link show "$WG_IFACE" &>/dev/null || exit 0
 
@@ -1045,15 +1054,25 @@ _restart_tunnel() {
   logger -t telemt-wg-watchdog "$1"
   conntrack -D -i "$WG_IFACE" 2>/dev/null || true
   wg-quick down "$WG_IFACE" 2>/dev/null
-  sleep 1
+  sleep 2
   wg-quick up "$WG_IFACE" 2>/dev/null
   rm -f "$STATE_FILE"
 }
 
-# Handshake stale > 5 min despite keepalive=25s → WireGuard broken
-if [ "$HS_AGE" -gt 300 ]; then
+# Handshake stale > 3 min despite keepalive=25s → WireGuard broken
+if [ "$HS_AGE" -gt 180 ]; then
   _restart_tunnel "Stale handshake (${HS_AGE}s) — restarting $WG_IFACE"
   exit 0
+fi
+
+# Ping test: if handshake is fresh but no ICMP reply → tunnel data path broken
+if ! ping -c 2 -W 3 -I "$WG_IFACE" "$PEER_IP" &>/dev/null; then
+  # Double-check with a second attempt after a brief pause
+  sleep 2
+  if ! ping -c 2 -W 3 -I "$WG_IFACE" "$PEER_IP" &>/dev/null; then
+    _restart_tunnel "Ping to $PEER_IP via $WG_IFACE failed (handshake ${HS_AGE}s ago) — restarting"
+    exit 0
+  fi
 fi
 
 # Handshake fresh but rx bytes not growing → stale conntrack entries
@@ -1074,9 +1093,9 @@ printf "rx %s\nts %s\n" "$RX_NOW" "$TS_NOW" > "$STATE_FILE"
 WATCHDOG_EOF
 
   chmod +x "$WATCHDOG"
-  printf "*/5 * * * * root %s\n" "$WATCHDOG" > "$CRON"
+  printf "*/2 * * * * root %s\n" "$WATCHDOG" > "$CRON"
   chmod 644 "$CRON"
-  printf "  \033[32m✔\033[0m  Watchdog installed (checks every 5 min)\n"
+  printf "  \033[32m✔\033[0m  Watchdog installed (checks every 2 min)\n"
 }
 
 function setup_mikrotik_cascade() {
@@ -1161,6 +1180,32 @@ function setup_mikrotik_cascade() {
       sed -i '/^PostUp = .*docker restart/i PostUp = conntrack -D -i wg-telemt 2>\/dev\/null || true' "$CONF_FILE"
       config_updated=true
       printf "  \033[32m✔\033[0m  Conntrack flush on restart added\n"
+    fi
+
+    # Patch existing config: add MTU = 1420 to prevent packet fragmentation through tunnel
+    if ! grep -q "^MTU" "$CONF_FILE" 2>/dev/null; then
+      printf "  \033[2mPatching config to set MTU = 1420 (fixes packet fragmentation)...\033[0m\n"
+      sed -i '/^ListenPort/a MTU = 1420' "$CONF_FILE"
+      config_updated=true
+      printf "  \033[32m✔\033[0m  MTU = 1420 added\n"
+    fi
+
+    # Patch existing config: add TCP MSS clamping to prevent oversized segments
+    if ! grep -q "clamp-mss-to-pmtu" "$CONF_FILE" 2>/dev/null; then
+      printf "  \033[2mPatching config to add TCP MSS clamping (fixes connection stalls)...\033[0m\n"
+      if grep -q "ip6tables" "$CONF_FILE" 2>/dev/null; then
+        sed -i '/^PostUp = conntrack -D/i PostUp = ip6tables -t mangle -A FORWARD -o wg-telemt -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu' "$CONF_FILE"
+        # Add PostDown cleanup before last PostDown line
+        echo 'PostDown = ip6tables -t mangle -D FORWARD -o wg-telemt -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true' >> "$CONF_FILE.mss_patch"
+        # Insert the PostDown line before the [Peer] section
+        sed -i '/^\[Peer\]/i PostDown = ip6tables -t mangle -D FORWARD -o wg-telemt -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true' "$CONF_FILE"
+      else
+        sed -i '/^PostUp = conntrack -D/i PostUp = iptables -t mangle -A FORWARD -o wg-telemt -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu' "$CONF_FILE"
+        sed -i '/^\[Peer\]/i PostDown = iptables -t mangle -D FORWARD -o wg-telemt -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true' "$CONF_FILE"
+      fi
+      rm -f "$CONF_FILE.mss_patch"
+      config_updated=true
+      printf "  \033[32m✔\033[0m  TCP MSS clamping added\n"
     fi
 
     # Install watchdog if not present
@@ -1266,17 +1311,20 @@ EOF
 PrivateKey = $SERVER_PRIV
 Address = $WG_IP_SERVER/64
 ListenPort = $WG_PORT
+MTU = 1420
 Table = off
 PostUp = ip6tables -t mangle -A PREROUTING -i wg-telemt ! -s $WG_IP_MIKROTIK -j CONNMARK --set-mark 200
 PostUp = ip6tables -t mangle -A PREROUTING -m connmark --mark 200 -j MARK --set-mark 200
 PostUp = ip -6 rule add fwmark 200 table 200 priority 90 2>/dev/null || true
 PostUp = ip6tables -t nat -I POSTROUTING 1 -o wg-telemt -m connmark --mark 200 -j SNAT --to-source $WG_IP_SERVER
+PostUp = ip6tables -t mangle -A FORWARD -o wg-telemt -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 PostUp = conntrack -D -i wg-telemt 2>/dev/null || true
 PostUp = (sleep 0.5; docker restart ${CONTAINER_NAME}) > /dev/null 2>&1 &
 PostDown = ip6tables -t mangle -D PREROUTING -i wg-telemt ! -s $WG_IP_MIKROTIK -j CONNMARK --set-mark 200 || true
 PostDown = ip6tables -t mangle -D PREROUTING -m connmark --mark 200 -j MARK --set-mark 200 || true
 PostDown = ip -6 rule del fwmark 200 table 200 priority 90 2>/dev/null || true
 PostDown = ip6tables -t nat -D POSTROUTING -o wg-telemt -m connmark --mark 200 -j SNAT --to-source $WG_IP_SERVER || true
+PostDown = ip6tables -t mangle -D FORWARD -o wg-telemt -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true
 
 [Peer]
 PublicKey = $MIKROTIK_PUB
@@ -1292,17 +1340,20 @@ EOF
 PrivateKey = $SERVER_PRIV
 Address = $WG_IP_SERVER/24
 ListenPort = $WG_PORT
+MTU = 1420
 Table = off
 PostUp = iptables -t mangle -A PREROUTING -i wg-telemt ! -s $WG_IP_MIKROTIK -j CONNMARK --set-mark 200
 PostUp = iptables -t mangle -A PREROUTING -m connmark --mark 200 -j MARK --set-mark 200
 PostUp = ip rule add fwmark 200 table 200 priority 90 2>/dev/null || true
 PostUp = iptables -t nat -I POSTROUTING 1 -o wg-telemt -m connmark --mark 200 -j SNAT --to-source $WG_IP_SERVER
+PostUp = iptables -t mangle -A FORWARD -o wg-telemt -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 PostUp = conntrack -D -i wg-telemt 2>/dev/null || true
 PostUp = (sleep 0.5; docker restart ${CONTAINER_NAME}) > /dev/null 2>&1 &
 PostDown = iptables -t mangle -D PREROUTING -i wg-telemt ! -s $WG_IP_MIKROTIK -j CONNMARK --set-mark 200 || true
 PostDown = iptables -t mangle -D PREROUTING -m connmark --mark 200 -j MARK --set-mark 200 || true
 PostDown = ip rule del fwmark 200 table 200 priority 90 2>/dev/null || true
 PostDown = iptables -t nat -D POSTROUTING -o wg-telemt -m connmark --mark 200 -j SNAT --to-source $WG_IP_SERVER || true
+PostDown = iptables -t mangle -D FORWARD -o wg-telemt -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true
 
 [Peer]
 PublicKey = $MIKROTIK_PUB
@@ -1520,6 +1571,9 @@ EOF
       sudo ip rule add fwmark 200 table 200 priority 90 2>/dev/null || true
     sudo $ipt_cmd -t nat -C POSTROUTING -o wg-telemt -m connmark --mark 200 -j SNAT --to-source "$WG_IP_SERVER" 2>/dev/null || \
       sudo $ipt_cmd -t nat -I POSTROUTING 1 -o wg-telemt -m connmark --mark 200 -j SNAT --to-source "$WG_IP_SERVER"
+    # Ensure TCP MSS clamping is active (prevents oversized segments through tunnel)
+    sudo $ipt_cmd -t mangle -C FORWARD -o wg-telemt -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || \
+      sudo $ipt_cmd -t mangle -A FORWARD -o wg-telemt -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
   fi
 }
 
